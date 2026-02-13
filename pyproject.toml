@@ -1,0 +1,52 @@
+[build-system]
+requires = ["wheel", "setuptools >= 61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["multicam*"]
+
+[project]
+name = "multicam"
+version = "0.1.0"
+description = "VIGIA 2.0 system: a multi-spectral camera system for volcanology."
+readme = "README.md"
+license = {text = "GPLv3"}
+requires-python = ">=3.12"
+authors = [
+    {name = "Conor Bacon", email = "conor.bacon@gmail.com"}
+]
+maintainers = [
+    {name = "Conor Bacon", email = "conor.bacon@gmail.com"}
+]
+keywords = ["volcanology", "data", "science", "instrumentation", "cameras"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+    "Natural Language :: English",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "imageio",
+    "inotify",
+    "numpy",
+    "opencv-python",
+    "pyplis",
+    "seabreeze",
+]
+
+[project.scripts]
+multicamctl = "multicam.cli:entry_point"
+
+[project.optional-dependencies]
+development = ["ruff", "ipython"]
+docs = ["Sphinx >= 1.8.1", "docutils"]
+
+[project.urls]
+GitHub = "https://github.com/fvasconez/VIGIA_2.0"
+Issues = "https://github.com/fvasconez/VIGIA_2.0/issues"
+
+[tool.ruff]
+line-length = 88

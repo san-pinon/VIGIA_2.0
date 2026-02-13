@@ -1,0 +1,6 @@
+.ruff_cache/
+.DS_Store/
+build/
+.venv/
+*.egg-info/
+
