@@ -12,16 +12,20 @@ import argparse
 import pathlib
 import sys
 
+from multicam.drivers.environmental import capture_environmental
 from multicam.drivers.infrared import capture_image as capture_ir_image
+from multicam.drivers.spectrometer import capture_spectra
 from multicam.drivers.ultraviolet import capture_image as capture_uv_images
 from multicam.drivers.visible import capture_image as capture_vis_image
 from multicam.utilities import read_config
 
 
 FN_MAP = {
+    "environmental": capture_environmental,
     "infrared": capture_ir_image,
-    "visible": capture_vis_image,
+    "spectrometer": capture_spectra,
     "ultraviolet": capture_uv_images,
+    "visible": capture_vis_image,
 }
 
 

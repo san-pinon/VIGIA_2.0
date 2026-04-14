@@ -42,6 +42,24 @@ class Spectrometer:
         self.spectrometer.trigger_mode(0)
 
         self._integration_time = 100_000
+        self._closed = False
+
+    def shutdown(self) -> None:
+        """Release spectrometer resources (idempotent)."""
+
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.spectrometer.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "Spectrometer":
+        return self
+
+    def __exit__(self, exception_type, exception_value, exception_traceback) -> None:
+        self.shutdown()
 
     @property
     def integration_time_micros(self):
@@ -147,26 +165,32 @@ def capture(spectrometer: Spectrometer, settings: dict | None = None) -> Capture
     # devs = list_devices()
     # spec = Spectrometer(devs[0])
 
-    spectrometer.spectrometer.integration_time_micros(settings["integration"])
+    import time as _time
 
-    # Capture and discard a spectrum as 'burn in'
+    if settings:
+        integration_time = settings.get("integration_time_us", spectrometer.integration_time_micros)
+        n_stack = int(settings.get("stacking", 1))
+    else:
+        integration_time = spectrometer.integration_time_micros
+        n_stack = 1
+
+    spectrometer.integration_time_micros = integration_time
+
+    # Capture and discard one spectrum as burn-in to flush the sensor.
     _ = spectrometer.spectrometer.intensities()
 
-    # wavelengths = spec.wavelengths()
-
-    # # Check saturation at any point?
-    # saturation_pixels = 2
-    # min_saturation = 0.6
-    # max_saturation = 0.9
-
-    # framerate = 0.1  # 10 Hz
-
-    # wavelength_min = 300.0
-    # wavelength_max = 335.0
-
     spectra_stack = (
-        np.add.reduce([spectrometer.spectrometer.intensities() for _ in range(settings["n_stack"])])
-        / settings["n_stack"]
+        np.add.reduce(
+            [spectrometer.spectrometer.intensities() for _ in range(n_stack)]
+        )
+        / n_stack
     )
 
-    return CaptureResult(metadata=settings, artifacts={"spectra_stack": spectra_stack})
+    meta = {
+        "ts_monotonic_ns": _time.monotonic_ns(),
+        "integration_time_us": integration_time,
+        "stacking": n_stack,
+        "wavelengths": spectrometer.wavelengths.tolist(),
+    }
+
+    return CaptureResult(metadata=meta, artifacts={"spectrum": spectra_stack})

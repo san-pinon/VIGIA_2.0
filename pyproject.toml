@@ -29,24 +29,36 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
+    "gphoto2",
     "imageio",
     "inotify",
     "numpy",
     "opencv-python",
     "pyplis",
     "seabreeze",
+    "smbus2",
 ]
 
 [project.scripts]
 multicamctl = "multicam.cli:entry_point"
 
 [project.optional-dependencies]
-development = ["ruff", "ipython"]
 docs = ["Sphinx >= 1.8.1", "docutils"]
+
+[tool.uv]
+dev-dependencies = ["ruff", "ipython"]
 
 [project.urls]
 GitHub = "https://github.com/fvasconez/VIGIA_2.0"
 Issues = "https://github.com/fvasconez/VIGIA_2.0/issues"
 
 [tool.ruff]
-line-length = 88
+line-length    = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+
+[tool.ruff.format]
+quote-style  = "double"
+indent-style = "space"

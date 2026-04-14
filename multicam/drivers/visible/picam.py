@@ -59,7 +59,7 @@ class Camera:
             raise ValueError("PiCamera config missing required key: 'camera_port'")
 
         self._config = dict(config)
-        self._closed + False
+        self._closed = False
 
         try:
             self.camera = PiCamera(config["camera_port"])

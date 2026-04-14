@@ -1,0 +1,119 @@
+# multicam_config.toml — VIGIA 2.0 reference configuration
+#
+# This file documents every instrument section, including those whose
+# drivers are not yet fully implemented.  Copy to
+# ~/.config/multicam_config.toml (default search path) and adjust
+# paths and parameters for your deployment.
+#
+# Status tags used in this file:
+#   IMPLEMENTED   — driver is complete and in use
+#   WIP           — driver skeleton exists, under active development
+#   NOT IMPLEMENTED — section reserved; driver not yet written
+
+# ---------------------------------------------------------------------------
+# System-level metadata
+# ---------------------------------------------------------------------------
+
+[metadata]
+vnum         = 341090          # Volcano number (VNUM catalogue)
+site_code    = "TLA"          # Short site identifier
+data_archive = "/home/user/data"
+
+# ---------------------------------------------------------------------------
+# Infrared camera — Optris Pi 640                          IMPLEMENTED
+# Interface: USB 3.0 via irdirectsdk (ctypes)
+# ---------------------------------------------------------------------------
+
+[infrared]
+model       = "optris"
+xml_path    = "/opt/libirimager/20052022.xml"   # Sensor calibration XML
+log_path    = "/home/user/logs/thermal"
+framerate   = 1     # Hz — frames per second requested
+frame_count = 1     # Number of frames captured per invocation
+
+# ---------------------------------------------------------------------------
+# Visible-spectrum camera                                  IMPLEMENTED (picam)
+#                                                          WIP (canon)
+# model = "picam"  → Raspberry Pi Camera Module via libcamera / picamera2
+# model = "canon"  → Canon DSLR via python-gphoto2
+# ---------------------------------------------------------------------------
+
+[visible]
+model       = "picam"   # "picam" | "canon"
+framerate   = 5
+frame_count = 10
+camera_port = 0         # /dev/video index (picam only)
+
+[visible.controls]
+# libcamera control overrides (picam only).  Key names match the
+# libcamera Controls enum (e.g. Saturation, Brightness, ExposureTime).
+Saturation = 0.0
+
+[visible.canon]
+# Settings applied via python-gphoto2 config widgets (canon only).
+iso          = 800
+shutterspeed = "1/250"  # gphoto2 shutterspeed string
+aperture     = "5.6"    # gphoto2 aperture string
+
+# ---------------------------------------------------------------------------
+# Ultraviolet camera pair — Dual Raspberry Pi Camera      IMPLEMENTED
+# Filters: 310 nm (camera_1) and 330 nm (camera_2)
+# Interface: MIPI-CSI via picamera2
+# ---------------------------------------------------------------------------
+
+[ultraviolet]
+model         = "picam"
+framerate     = 0.5     # Hz
+frame_count   = 1
+camera_1_port = 0       # /dev/video index for 310 nm camera
+camera_2_port = 1       # /dev/video index for 330 nm camera
+
+# ---------------------------------------------------------------------------
+# Spectrometer — OceanInsight SR4                          WIP
+# Interface: USB via seabreeze (pyseabreeze backend)
+# ---------------------------------------------------------------------------
+
+[spectrometer]
+model               = "oceaninsight"
+integration_time_us = 100000   # Integration time in microseconds
+stacking            = 5        # Number of spectra averaged per measurement
+frame_count         = 1        # Measurements per CLI invocation
+framerate           = 0.016    # Hz (~1 measurement per minute)
+
+# ---------------------------------------------------------------------------
+# Environmental sensors                                    NOT IMPLEMENTED
+#
+# BME280 — temperature, pressure, relative humidity
+#   Datasheet: https://www.bosch-sensortec.com/products/environmental-sensors/humidity-sensors-bme280/
+#   Interface: I2C (smbus2)
+#   Default I2C address: 0x76 (SDO pulled low) or 0x77 (SDO pulled high)
+#
+# SHT30  — temperature, relative humidity
+#   Datasheet: https://sensirion.com/products/catalog/SHT30-DIS-B/
+#   Interface: I2C (smbus2)
+#   Default I2C address: 0x44 (ADDR pin low) or 0x45 (ADDR pin high)
+# ---------------------------------------------------------------------------
+
+[environmental.bme280]
+enabled  = true
+i2c_bus  = 1       # Linux I2C bus number (/dev/i2c-1)
+address  = 0x76    # I2C 7-bit address
+
+[environmental.sht30]
+enabled  = true
+i2c_bus  = 1
+address  = 0x44
+
+[environmental]
+sampling_interval_s = 60   # Seconds between readings (for daemon/loop use)
+
+# ---------------------------------------------------------------------------
+# GNSS timing antenna                                      NOT IMPLEMENTED
+# Provides accurate UTC timestamps for data synchronisation.
+# Interface: serial NMEA stream (typically /dev/ttyACM0 or /dev/ttyUSB0)
+# ---------------------------------------------------------------------------
+
+[gnss]
+enabled  = false
+port     = "/dev/ttyACM0"
+baudrate = 115200

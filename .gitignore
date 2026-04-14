@@ -1,5 +1,9 @@
 .ruff_cache/
-.DS_Store/
+.DS_Store
+.claude/
+.extra/
+.systems/
+CLAUDE.md
 build/
 .venv/
 *.egg-info/

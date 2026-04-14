@@ -1,5 +1,10 @@
 """
-Driver for a Canon DSLR camera using system calls to gphoto2.
+Driver for a Canon DSLR camera using python-gphoto2.
+
+Design goals:
+- Daemon-ready (stable lifecycle, predictable exceptions)
+- Driver does device IO only.
+- Consistent capture interface.
 
 :copyright:
     2026, Conor A. Bacon.
@@ -11,93 +16,189 @@ Driver for a Canon DSLR camera using system calls to gphoto2.
 
 from __future__ import annotations
 
-import subprocess
 import time
+from io import BytesIO
 from typing import Any, Mapping
 
+import imageio.v3 as iio
+import numpy as np
+
 from multicam.drivers import CaptureResult
+from multicam.errors import CaptureFailure
 
 
-# Check availability of gphoto2
+try:
+    import gphoto2 as gp
+except ModuleNotFoundError as e:
+    gp = None
+    _GPHOTO2_IMPORT_ERROR = e
+else:
+    _GPHOTO2_IMPORT_ERROR = None
+
+# gphoto2 event type returned when a new file is ready to download.
+_GP_EVENT_FILE_ADDED = 2  # gp.GP_EVENT_FILE_ADDED
 
 
 class Camera:
-    def __init__(self):
-        """
-        Long-lived camera controller.
+    """
+    Long-lived Canon DSLR controller via python-gphoto2.
 
-        """
+    Expected config shape (``config["visible"]``):
 
-        def __init__(self, config: Mapping[str, Any]) -> None:
-            # Do something here to ensure gphoto2 is available.
+    .. code-block:: toml
+
+        [visible]
+        model = "canon"
+
+        [visible.canon]
+        iso          = 800
+        shutterspeed = "1/250"
+        aperture     = "5.6"
+
+    """
+
+    def __init__(self, config: Mapping[str, Any]) -> None:
+        if gp is None:
+            raise RuntimeError(
+                "python-gphoto2 is not installed; cannot use Canon DSLR driver."
+            ) from _GPHOTO2_IMPORT_ERROR
+
+        self._config = dict(config)
+        self._closed = False
+
+        try:
+            self.camera = gp.Camera()
+            self.camera.init()
+        except gp.GPhoto2Error as e:
+            raise RuntimeError(
+                f"Failed to initialise Canon camera (is it connected and unlocked?): {e}"
+            ) from e
+
+    def shutdown(self) -> None:
+        """Release camera resources (idempotent)."""
+
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.camera.exit()
+        except Exception:
             pass
 
+    def __enter__(self) -> "Camera":
+        return self
 
-def capture(camera: Camera, settings: dict, burst: bool = False):
+    def __exit__(self, exception_type, exception_value, exception_traceback) -> None:
+        self.shutdown()
+
+    def __str__(self) -> str:
+        try:
+            abilities = self.camera.get_abilities()
+            return f"{abilities.model} (Canon DSLR via gphoto2)"
+        except Exception:
+            return "Canon DSLR (via gphoto2)"
+
+
+def _set_config_value(camera: gp.Camera, name: str, value: Any) -> None:
+    """Apply a single named widget value to the camera configuration."""
+
+    cfg = camera.get_config()
+    widget = cfg.get_child_by_name(name)
+    widget.set_value(str(value))
+    camera.set_config(cfg)
+
+
+def capture(camera: Camera, settings: dict | None = None) -> CaptureResult:
     """
-    Capture a frame.
+    Trigger the shutter and retrieve the captured image.
+
+    The function applies any ``settings`` overrides (iso, shutterspeed,
+    aperture) via the gphoto2 configuration interface, triggers the
+    shutter, waits for the ``GP_EVENT_FILE_ADDED`` event, downloads the
+    file into memory, and decodes it to a NumPy array using imageio.
 
     Parameters
     ----------
     camera:
         Initialised camera object.
     settings:
-        Local overrides for camera settings.
+        Optional dict with keys ``iso``, ``shutterspeed``, ``aperture``
+        that override the values stored in ``camera._config["canon"]``.
 
     Returns
     -------
     capture_result:
-        Object containing metadata and artifacts.
+        Object containing metadata and image artifact.
+
+    Raises
+    ------
+    CaptureFailure:
+        If the camera does not signal a file-added event within the
+        timeout period, or if image decoding fails.
 
     """
 
-    # if burst:
-    #     shutter_sequence = ()
-    # else:
-    #     wait_event = ""
+    if gp is None:
+        raise RuntimeError(
+            "python-gphoto2 is not installed."
+        ) from _GPHOTO2_IMPORT_ERROR
 
-    # Build subprocess command
-    cmd = [
-        "gphoto2",
-        f"--set-config iso={settings['iso']}",
-        "--set-config capturetarget=1",
-        f"--set-config shutterspeed={settings['shutterspeed']}",
-        f"--set-config aperture={settings['aperture']}",
-        '--set-config eosremoterelease="Immediate"',
-        '--set-config eosremoterelease="Release Full"',
-        "--wait-event-and-download=ObjectRemoved",
-        "--force-overwrite",
-    ]
-    subprocess.call(cmd)
+    canon_cfg = dict(camera._config.get("canon", {}))
+    if settings:
+        canon_cfg.update(settings)
+
+    # --- Apply camera settings ---
+    setting_map = {
+        "iso": "iso",
+        "shutterspeed": "shutterspeed",
+        "aperture": "aperture",
+    }
+    for key, widget_name in setting_map.items():
+        if key in canon_cfg:
+            try:
+                _set_config_value(camera.camera, widget_name, canon_cfg[key])
+            except gp.GPhoto2Error as e:
+                raise CaptureFailure(
+                    f"Failed to set Canon config '{widget_name}': {e}"
+                ) from e
+
+    # --- Trigger shutter ---
+    try:
+        camera.camera.trigger_capture()
+    except gp.GPhoto2Error as e:
+        raise CaptureFailure(f"Canon shutter trigger failed: {e}") from e
+
+    ts_monotonic_ns = time.monotonic_ns()
+
+    # --- Wait for file-added event (max 30 s) ---
+    file_path = None
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        event_type, event_data = camera.camera.wait_for_event(1000)  # ms
+        if event_type == gp.GP_EVENT_FILE_ADDED:
+            file_path = event_data
+            break
+        if event_type == gp.GP_EVENT_CAPTURE_COMPLETE:
+            continue  # keep waiting for the file
+
+    if file_path is None:
+        raise CaptureFailure("Timed out waiting for Canon file-added event.")
+
+    # --- Download image into memory ---
+    try:
+        camera_file = camera.camera.file_get(
+            file_path.folder, file_path.name, gp.GP_FILE_TYPE_NORMAL
+        )
+        raw_bytes = memoryview(camera_file.get_data_and_size())
+        image: np.ndarray = iio.imread(BytesIO(bytes(raw_bytes)))
+    except Exception as e:
+        raise CaptureFailure(f"Failed to download/decode Canon image: {e}") from e
 
     meta = {
-        "ts_monotonic_ns": time.monotonic_ns(),
-        # "shape": tuple(image.shape),
-        # "dtype": str(image.dtype),
+        "ts_monotonic_ns": ts_monotonic_ns,
+        "shape": tuple(image.shape),
+        "dtype": str(image.dtype),
+        "filename": file_path.name,
     }
 
     return CaptureResult(metadata=meta, artifacts={"image": image})
-
-
-# if __name__ == "__main__":
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument(
-#         "--iso",
-#         help="Specify the ISO setting to be used.",
-#         required=True,
-#     )
-#     parser.add_argument(
-#         "--shutterspeed",
-#         help="Specify the shutterspeed to be used.",
-#         required=True,
-#     )
-#     parser.add_argument(
-#         "--aperture",
-#         help="Specify the aperture to be used.",
-#         required=True,
-#     )
-#     settings = parser.parse_args()
-
-#     camera = Camera()
-
-#     metadata, image = capture(camera, settings)
