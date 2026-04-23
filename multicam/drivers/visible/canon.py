@@ -17,15 +17,15 @@ Design goals:
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from io import BytesIO
-from typing import Any, Mapping
+from typing import Any
 
 import imageio.v3 as iio
 import numpy as np
 
 from multicam.drivers import CaptureResult
 from multicam.errors import CaptureFailure
-
 
 try:
     import gphoto2 as gp
@@ -35,8 +35,6 @@ except ModuleNotFoundError as e:
 else:
     _GPHOTO2_IMPORT_ERROR = None
 
-# gphoto2 event type returned when a new file is ready to download.
-_GP_EVENT_FILE_ADDED = 2  # gp.GP_EVENT_FILE_ADDED
 
 
 class Camera:
@@ -71,7 +69,8 @@ class Camera:
             self.camera.init()
         except gp.GPhoto2Error as e:
             raise RuntimeError(
-                f"Failed to initialise Canon camera (is it connected and unlocked?): {e}"
+                "Failed to initialise Canon camera "
+                f"(is it connected and unlocked?): {e}"
             ) from e
 
     def shutdown(self) -> None:
@@ -85,7 +84,7 @@ class Camera:
         except Exception:
             pass
 
-    def __enter__(self) -> "Camera":
+    def __enter__(self) -> Camera:
         return self
 
     def __exit__(self, exception_type, exception_value, exception_traceback) -> None:
@@ -99,12 +98,13 @@ class Camera:
             return "Canon DSLR (via gphoto2)"
 
 
-def _set_config_value(camera: gp.Camera, name: str, value: Any) -> None:
-    """Apply a single named widget value to the camera configuration."""
+def _apply_config_values(camera: gp.Camera, settings: dict[str, Any]) -> None:
+    """Apply multiple widget values in a single get_config/set_config round-trip."""
 
     cfg = camera.get_config()
-    widget = cfg.get_child_by_name(name)
-    widget.set_value(str(value))
+    for name, value in settings.items():
+        widget = cfg.get_child_by_name(name)
+        widget.set_value(str(value))
     camera.set_config(cfg)
 
 
@@ -147,20 +147,14 @@ def capture(camera: Camera, settings: dict | None = None) -> CaptureResult:
     if settings:
         canon_cfg.update(settings)
 
-    # --- Apply camera settings ---
-    setting_map = {
-        "iso": "iso",
-        "shutterspeed": "shutterspeed",
-        "aperture": "aperture",
-    }
-    for key, widget_name in setting_map.items():
-        if key in canon_cfg:
-            try:
-                _set_config_value(camera.camera, widget_name, canon_cfg[key])
-            except gp.GPhoto2Error as e:
-                raise CaptureFailure(
-                    f"Failed to set Canon config '{widget_name}': {e}"
-                ) from e
+    # --- Apply camera settings (one round-trip for all widgets) ---
+    widget_map = {"iso": "iso", "shutterspeed": "shutterspeed", "aperture": "aperture"}
+    to_apply = {widget_map[k]: v for k, v in canon_cfg.items() if k in widget_map}
+    if to_apply:
+        try:
+            _apply_config_values(camera.camera, to_apply)
+        except gp.GPhoto2Error as e:
+            raise CaptureFailure(f"Failed to apply Canon camera settings: {e}") from e
 
     # --- Trigger shutter ---
     try:

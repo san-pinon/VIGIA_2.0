@@ -11,15 +11,15 @@ Driver for an Optris model IR camera using the 'irdirectsdk' framework.
 
 import ctypes
 import time
+from collections.abc import Mapping
 from ctypes.util import find_library
-from typing import Any, Mapping
+from typing import Any
 
 import cv2 as cv
 import numpy as np
 
 from multicam.drivers import CaptureResult
 from multicam.errors import CaptureFailure
-
 
 libname = find_library("irdirectsdk")
 if not libname:
@@ -62,7 +62,10 @@ class Camera:
 
         self.metadata = EvoIRFrameMetadata()
 
-        self.close()  # Free any hanging process
+        # Terminate any stale irdirectsdk session before initialising.
+        self._closed = False
+        self.close()
+        self._closed = False
 
         ret = LIBIR.evo_irimager_usb_init(xml_path, formats_def_path, log_path)
         if ret != 0:
@@ -85,7 +88,6 @@ class Camera:
         )
 
         self._config = dict(config)
-        self._closed = False
 
     def close(self) -> None:
         """Close camera resources (idempotent)."""

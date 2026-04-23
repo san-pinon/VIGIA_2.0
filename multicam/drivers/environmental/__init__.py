@@ -15,11 +15,15 @@ Supported hardware:
 
 import json
 import pathlib
-from datetime import datetime as dt, UTC
+from datetime import UTC
+from datetime import datetime as dt
 
 from multicam.errors import CaptureFailure
-from .bme280 import BME280, capture as bme280_capture
-from .sht30 import SHT30, capture as sht30_capture
+
+from .bme280 import BME280
+from .bme280 import capture as bme280_capture
+from .sht30 import SHT30
+from .sht30 import capture as sht30_capture
 
 
 def _write_reading(timestamp: dt, readings: dict, config: dict) -> None:
@@ -39,6 +43,7 @@ def _write_reading(timestamp: dt, readings: dict, config: dict) -> None:
         / "receive"
         / fname
     )
+    dest.parent.mkdir(parents=True, exist_ok=True)
 
     payload = {
         "timestamp_utc": timestamp.isoformat(),

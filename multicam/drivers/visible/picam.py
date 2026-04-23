@@ -17,17 +17,16 @@ Design goals:
 from __future__ import annotations
 
 import time
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 import numpy as np
 
 from multicam.drivers import CaptureResult
 from multicam.errors import CaptureFailure
 
-
 try:
     from picamera2 import Picamera2 as PiCamera
-    from libcamera import controls
 except ModuleNotFoundError as e:
     PiCamera = None
     _PICAMERA2_IMPORT_ERROR = e
@@ -89,7 +88,7 @@ class Camera:
         except Exception:
             pass
 
-    def __enter__(self) -> "Camera":
+    def __enter__(self) -> Camera:
         return self
 
     def __exit__(self, exception_type, exception_value, exception_traceback) -> None:
@@ -176,7 +175,7 @@ def check_image_saturation(
     if rows is None:
         cropped_image = image.ravel()
     else:
-        cropped_image[rows[0] : rows[1], :].ravel()
+        cropped_image = image[rows[0] : rows[1], :].ravel()
 
     average_DN = np.mean(cropped_image[cropped_image.argsort()[-pixel_count:]])
 

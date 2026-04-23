@@ -1,0 +1,14 @@
+[Unit]
+Description=VIGIA 2.0 — file monitor and archival daemon
+After=network.target
+
+[Service]
+User=user
+Type=simple
+WorkingDirectory=/home/user
+ExecStart=/home/user/.venv/bin/python /home/user/multicam/scripts/file_monitor.py
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

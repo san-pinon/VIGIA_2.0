@@ -10,16 +10,23 @@ Collection of drivers for IR camera systems.
 """
 
 import pathlib
-from datetime import datetime as dt, timedelta as td, UTC
+from datetime import UTC
+from datetime import datetime as dt
+from datetime import timedelta as td
 
 import cv2
 import numpy as np
 
 from multicam.errors import CaptureFailure
+
+from .optris import (
+    Camera as OptrisCamera,
+)
+from .optris import (
+    _convert_temp2image,
+)
 from .optris import (
     capture as capture_optris,
-    Camera as OptrisCamera,
-    _convert_temp2image,
 )
 
 
@@ -82,7 +89,7 @@ def capture_image(config: dict) -> None:
         while frames < instrument_config["frame_count"]:
             utcnow = dt.now(UTC)
 
-            # Capture first frame immediately, otherwise wait for frame interval to elapse
+            # Capture first frame immediately; then wait for the frame interval.
             if utcnow < starttime + td(seconds=time_between_frames) and frames != 0:
                 continue
 

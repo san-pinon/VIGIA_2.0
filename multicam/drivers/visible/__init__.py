@@ -10,14 +10,19 @@ Collection of drivers for visible camera systems.
 """
 
 import pathlib
-from datetime import datetime as dt, timedelta as td, UTC
+from datetime import UTC
+from datetime import datetime as dt
+from datetime import timedelta as td
 
 import cv2
 import numpy as np
 
 from multicam.errors import CaptureFailure
-from .picam import capture as capture_picam, Camera as PiCamera
-from .canon import capture as capture_canon, Camera as CanonCamera
+
+from .canon import Camera as CanonCamera
+from .canon import capture as capture_canon
+from .picam import Camera as PiCamera
+from .picam import capture as capture_picam
 
 
 def _write_image(
@@ -82,7 +87,7 @@ def capture_image(config: dict) -> None:
         while frames < instrument_config["frame_count"]:
             utcnow = dt.now(UTC)
 
-            # Capture first frame immediately, otherwise wait for frame interval to elapse
+            # Capture first frame immediately; then wait for the frame interval.
             if utcnow < starttime + td(seconds=time_between_frames) and frames != 0:
                 continue
 

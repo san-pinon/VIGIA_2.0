@@ -19,7 +19,6 @@ from multicam.drivers.ultraviolet import capture_image as capture_uv_images
 from multicam.drivers.visible import capture_image as capture_vis_image
 from multicam.utilities import read_config
 
-
 FN_MAP = {
     "environmental": capture_environmental,
     "infrared": capture_ir_image,

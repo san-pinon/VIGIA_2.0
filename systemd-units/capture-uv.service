@@ -1,0 +1,12 @@
+[Unit]
+Description=VIGIA 2.0 — capture UV image pair (310 nm + 330 nm)
+Wants=capture-uv.timer
+
+[Service]
+User=user
+Type=oneshot
+WorkingDirectory=/home/user
+ExecStart=/home/user/.venv/bin/multicamctl capture ultraviolet
+
+[Install]
+WantedBy=multi-user.target

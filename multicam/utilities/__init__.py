@@ -11,5 +11,4 @@
 from .config import read_config
 from .core import rsync
 
-
 __all__ = [read_config, rsync]

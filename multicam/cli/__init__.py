@@ -14,7 +14,6 @@ import sys
 
 from .capture import image_capture_handler
 
-
 FN_MAP = {
     "capture": image_capture_handler,
 }

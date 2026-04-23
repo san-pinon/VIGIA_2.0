@@ -1,0 +1,11 @@
+[Unit]
+Description=VIGIA 2.0 — trigger UV capture every minute
+Requires=capture-uv.service
+
+[Timer]
+Unit=capture-uv.service
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

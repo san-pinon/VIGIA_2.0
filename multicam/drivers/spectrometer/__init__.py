@@ -11,12 +11,22 @@ Collection of drivers for spectrometer systems.
 
 import pathlib
 import time
-from datetime import datetime as dt, UTC
+from datetime import UTC
+from datetime import datetime as dt
 
 import numpy as np
 
 from multicam.errors import CaptureFailure
-from .oceaninsight import capture, Spectrometer
+
+from .oceaninsight import Spectrometer, capture
+
+
+def _receive_dir(config: dict) -> pathlib.Path:
+    """Return (and create) the spectrometer receive directory."""
+
+    path = pathlib.Path(config["metadata"]["data_archive"]) / "spectrometer" / "receive"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _write_spectrum(timestamp: dt, spectrum: np.ndarray, config: dict) -> None:
@@ -28,8 +38,21 @@ def _write_spectrum(timestamp: dt, spectrum: np.ndarray, config: dict) -> None:
     time_str = timestamp.strftime("%H%M%S")
 
     fname = f"{meta['vnum']}.{meta['site_code']}.{year}.{julday:03d}_{time_str}.npy"
-    dest = pathlib.Path(config["metadata"]["data_archive"]) / "spectrometer" / "receive" / fname
-    np.save(dest, spectrum)
+    np.save(_receive_dir(config) / fname, spectrum)
+
+
+def _write_wavelengths(timestamp: dt, wavelengths: np.ndarray, config: dict) -> None:
+    """Write the wavelength axis once per session alongside the spectra."""
+
+    meta = config["metadata"]
+    year = timestamp.strftime("%Y")
+    julday = int(timestamp.strftime("%j"))
+    time_str = timestamp.strftime("%H%M%S")
+
+    fname = (
+        f"{meta['vnum']}.{meta['site_code']}.{year}.{julday:03d}_{time_str}_wavelengths.npy"
+    )
+    np.save(_receive_dir(config) / fname, wavelengths)
 
 
 def capture_spectra(config: dict) -> None:
@@ -56,6 +79,8 @@ def capture_spectra(config: dict) -> None:
         print(f"Capturing {frame_count} spectrum/spectra at {framerate} Hz...")
         frames = 0
         start_time = dt.now(UTC)
+
+        _write_wavelengths(start_time, spectrometer.wavelengths, config)
 
         while frames < frame_count:
             try:

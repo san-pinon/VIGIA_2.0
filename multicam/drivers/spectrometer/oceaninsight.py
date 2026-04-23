@@ -11,15 +11,19 @@ Driver for an OceanInsight spectrometer using seabreeze.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+import math
+import time
+from collections.abc import Mapping
+from typing import Any
 
 import numpy as np
 import seabreeze
 
 seabreeze.use("pyseabreeze")
-from seabreeze.spectrometers import list_devices, Spectrometer as Spectrometer_
+from seabreeze.spectrometers import Spectrometer as Spectrometer_  # noqa: E402
+from seabreeze.spectrometers import list_devices  # noqa: E402
 
-from multicam.drivers import CaptureResult
+from multicam.drivers import CaptureResult  # noqa: E402
 
 
 class Spectrometer:
@@ -28,9 +32,14 @@ class Spectrometer:
 
     Attributes
     ----------
-    spectrometer: The `seabreeze.Spectrometer` object.
-    integration_time_micros: The integration time in microseconds.
-    wavelengths: The wavelengths measured by the spectrometer in nanometers.
+    spectrometer:
+        The underlying ``seabreeze.Spectrometer`` object.
+    integration_time_micros:
+        The currently applied integration time in microseconds.
+    wavelengths:
+        The wavelengths (nm) to which the spectrometer is sensitive.
+    bit_depth:
+        The ADC bit depth of the detector (read from the device).
 
     """
 
@@ -44,6 +53,12 @@ class Spectrometer:
         self._integration_time = 100_000
         self._closed = False
 
+        # Apply integration time from config immediately so the first capture
+        # uses the correct value (avoids a silent mismatch if the default
+        # 100 000 µs differs from the configured value).
+        configured_time = int(config.get("integration_time_us", self._integration_time))
+        self.integration_time_micros = configured_time
+
     def shutdown(self) -> None:
         """Release spectrometer resources (idempotent)."""
 
@@ -55,36 +70,45 @@ class Spectrometer:
         except Exception:
             pass
 
-    def __enter__(self) -> "Spectrometer":
+    def __enter__(self) -> Spectrometer:
         return self
 
     def __exit__(self, exception_type, exception_value, exception_traceback) -> None:
         self.shutdown()
 
     @property
-    def integration_time_micros(self):
-        """Return the currently set integration time."""
+    def integration_time_micros(self) -> int:
+        """Return the currently set integration time in microseconds."""
 
         return self._integration_time
 
     @integration_time_micros.setter
-    def integration_time_micros(self, value):
-        """Update the integration time for the Spectrometer."""
+    def integration_time_micros(self, value: int) -> None:
+        """Update the integration time for the spectrometer."""
 
         lower_limit, upper_limit = self.spectrometer.integration_time_micros_limits
 
         if value < lower_limit or value > upper_limit:
             raise ValueError(
-                f"Specified time ({value} microseconds) lies outside range of possible "
-                f"integration times:\n\t{lower_limit} - {upper_limit} microseconds"
+                f"Specified time ({value} µs) lies outside the device range: "
+                f"{lower_limit}–{upper_limit} µs"
             )
 
         self._integration_time = value
         self.spectrometer.integration_time_micros(value)
 
     @property
-    def wavelengths(self):
-        """Return the set of wavelengths to which the spectrometer is sensitive."""
+    def bit_depth(self) -> int:
+        """ADC bit depth of the detector, read from the seabreeze device features."""
+
+        # seabreeze exposes max_intensity (= 2**bit_depth - 1).
+        # Confirmed on OceanHR4: max_intensity = 65535.0  →  bit_depth = 16.
+        max_intensity = self.spectrometer.max_intensity
+        return math.floor(math.log2(max_intensity + 1))
+
+    @property
+    def wavelengths(self) -> np.ndarray:
+        """Return the set of wavelengths (nm) to which the spectrometer is sensitive."""
 
         return self.spectrometer.wavelengths()
 
@@ -100,36 +124,43 @@ def check_spectrum_saturation(
     """
     Check whether a spectrum is over-/under-exposed.
 
-    An average of the top N pixel values is used in order to avoid broken pixels
-    causing erroneous estimates of the exposure. A specific range of wavelengths may be
-    chosen.
+    An average of the top N pixel values is used to avoid broken pixels
+    causing erroneous exposure estimates. A specific wavelength sub-range
+    may be selected (useful for restricting the assessment to the SO₂
+    absorption band, ~310–330 nm).
 
     Parameters
     ----------
     spectrum:
-        The spectrum to be analysed.
+        The spectrum to be analysed (intensity values).
+    spectrometer:
+        The ``Spectrometer`` object — used to derive the ADC bit depth.
     min_saturation:
-        The threshold below which the spectrum is considered under-exposed.
+        Fraction below which the spectrum is considered under-exposed.
     max_saturation:
-        The threshold above which the spectrum is considered over-exposed.
-    bit_depth:
-        The number of bits used to digitise the values reported by the sensor.
+        Fraction above which the spectrum is considered over-exposed.
     pixel_count:
-        The number of pixels to use to compute the average pixel value.
-    wavelength_raneg:
-        The range of wavelengths in the spectrum used to compute the
-        average pixel value.
+        Number of brightest pixels used to compute the average DN.
+    wavelength_range:
+        ``(min_nm, max_nm)`` sub-range to restrict the assessment to.
+        If ``None``, the full spectrum is used.
 
     Returns
     -------
     saturation_flag:
-        An integer flag indicated whether the spectrum is under-exposed (1), adequately
-        exposed (0), or over-exposed (-1).
+        ``1``  — under-exposed,
+        ``0``  — adequately exposed,
+        ``-1`` — over-exposed.
 
     """
 
-    # Get spectrum sub-range
-    subspectrum = spectrum
+    if wavelength_range is not None:
+        wavelengths = spectrometer.wavelengths
+        lo, hi = wavelength_range
+        mask = (wavelengths >= lo) & (wavelengths <= hi)
+        subspectrum = spectrum[mask]
+    else:
+        subspectrum = spectrum
 
     average_DN = np.mean(subspectrum[subspectrum.argsort()[-pixel_count:]])
 
@@ -146,29 +177,29 @@ def check_spectrum_saturation(
 
 def capture(spectrometer: Spectrometer, settings: dict | None = None) -> CaptureResult:
     """
-    Capture spectra.
+    Capture a (optionally stacked) spectrum.
 
     Parameters
     ----------
     spectrometer:
-        Initialised spectrometer object.
+        Initialised ``Spectrometer`` object.
     settings:
-        Local overrides for spectrometer settings.
+        Per-call overrides: ``integration_time_us`` (int) and/or
+        ``stacking`` (int, number of spectra to average).
 
     Returns
     -------
     capture_result:
-        Object containing metadata and artifacts.
+        Metadata contains ``ts_monotonic_ns``, ``integration_time_us``,
+        ``stacking``, and ``wavelengths``.
+        Artifacts contain ``spectrum`` (1-D ``np.ndarray``).
 
     """
 
-    # devs = list_devices()
-    # spec = Spectrometer(devs[0])
-
-    import time as _time
-
     if settings:
-        integration_time = settings.get("integration_time_us", spectrometer.integration_time_micros)
+        integration_time = int(
+            settings.get("integration_time_us", spectrometer.integration_time_micros)
+        )
         n_stack = int(settings.get("stacking", 1))
     else:
         integration_time = spectrometer.integration_time_micros
@@ -187,7 +218,7 @@ def capture(spectrometer: Spectrometer, settings: dict | None = None) -> Capture
     )
 
     meta = {
-        "ts_monotonic_ns": _time.monotonic_ns(),
+        "ts_monotonic_ns": time.monotonic_ns(),
         "integration_time_us": integration_time,
         "stacking": n_stack,
         "wavelengths": spectrometer.wavelengths.tolist(),

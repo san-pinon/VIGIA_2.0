@@ -26,7 +26,7 @@ data_archive = "/home/user/data"
 
 [infrared]
 model       = "optris"
-xml_path    = "/opt/libirimager/20052022.xml"   # Sensor calibration XML
+xml_path    = "/usr/share/libirimager/cali/Cali-24062074.xml"   # Sensor calibration XML
 log_path    = "/home/user/logs/thermal"
 framerate   = 1     # Hz — frames per second requested
 frame_count = 1     # Number of frames captured per invocation
@@ -62,45 +62,54 @@ aperture     = "5.6"    # gphoto2 aperture string
 # ---------------------------------------------------------------------------
 
 [ultraviolet]
-model         = "picam"
-framerate     = 0.5     # Hz
-frame_count   = 1
-camera_1_port = 0       # /dev/video index for 310 nm camera
-camera_2_port = 1       # /dev/video index for 330 nm camera
+model              = "picam"
+framerate          = 0.5     # Hz
+frame_count        = 1
+camera_1_port      = 0       # Confirm port → filter mapping on the RPi5 before deploying
+camera_2_port      = 1
+camera_1_filter_nm = 310     # Wavelength of the filter on camera_1 (nm)
+camera_2_filter_nm = 330     # Wavelength of the filter on camera_2 (nm)
+start_delay_s      = 0.5     # Warm-up delay after camera start() before first capture
+
+[ultraviolet.controls]
+# libcamera control overrides applied to both UV cameras.
+# Tune ExposureTime (µs) on-site to achieve ~50–70 % well fill.
+# ExposureTime = 50000
+# AnalogueGain = 1.0
 
 # ---------------------------------------------------------------------------
-# Spectrometer — OceanInsight SR4                          WIP
+# Spectrometer — OceanInsight OceanHR4                     WIP
+# USB ID: 0999:1002  |  Device confirmed on RPi5 at /dev/bus/usb/003/002
 # Interface: USB via seabreeze (pyseabreeze backend)
+# Confirmed limits: integration_time_us in [3800, 10000000], bit_depth=16
 # ---------------------------------------------------------------------------
 
 [spectrometer]
 model               = "oceaninsight"
-integration_time_us = 100000   # Integration time in microseconds
+integration_time_us = 100000   # µs — confirmed within [3800, 10000000]
 stacking            = 5        # Number of spectra averaged per measurement
 frame_count         = 1        # Measurements per CLI invocation
 framerate           = 0.016    # Hz (~1 measurement per minute)
 
 # ---------------------------------------------------------------------------
-# Environmental sensors                                    NOT IMPLEMENTED
+# Environmental sensors                                    IMPLEMENTED (driver)
 #
 # BME280 — temperature, pressure, relative humidity
-#   Datasheet: https://www.bosch-sensortec.com/products/environmental-sensors/humidity-sensors-bme280/
-#   Interface: I2C (smbus2)
-#   Default I2C address: 0x76 (SDO pulled low) or 0x77 (SDO pulled high)
+#   Interface: I2C (smbus2) | Confirmed: bus 1, address 0x77 (SDO high) on RPi5
 #
 # SHT30  — temperature, relative humidity
-#   Datasheet: https://sensirion.com/products/catalog/SHT30-DIS-B/
-#   Interface: I2C (smbus2)
-#   Default I2C address: 0x44 (ADDR pin low) or 0x45 (ADDR pin high)
+#   Interface: I2C (smbus2) | Default address: 0x44 (ADDR low) / 0x45 (ADDR high)
+#   *** HARDWARE ISSUE: SHT30 not detected on any I2C bus — likely bad soldering.
+#   *** Keep enabled = false until confirmed on i2cdetect -y 1 (look for 0x44).
 # ---------------------------------------------------------------------------
 
 [environmental.bme280]
 enabled  = true
 i2c_bus  = 1       # Linux I2C bus number (/dev/i2c-1)
-address  = 0x76    # I2C 7-bit address
+address  = 0x77    # SDO pin pulled high on this unit
 
 [environmental.sht30]
-enabled  = true
+enabled  = false   # DISABLED: sensor not detected — see note above
 i2c_bus  = 1
 address  = 0x44
 
@@ -108,12 +117,15 @@ address  = 0x44
 sampling_interval_s = 60   # Seconds between readings (for daemon/loop use)
 
 # ---------------------------------------------------------------------------
-# GNSS timing antenna                                      NOT IMPLEMENTED
-# Provides accurate UTC timestamps for data synchronisation.
-# Interface: serial NMEA stream (typically /dev/ttyACM0 or /dev/ttyUSB0)
+# GNSS timing antenna                                      SYSADMIN TASK
+# RPi5 hosts the GPS, acts as NTP server. SBC syncs from RPi5 via NTP.
+# No Python capture driver required — see TODO.md for chrony setup.
+#
+# Confirmed: GPS appears at /dev/ttyUSB0 on RPi5 (USB-UART bridge).
+# RPi5 IP: 192.168.30.101
 # ---------------------------------------------------------------------------
 
 [gnss]
-enabled  = false
-port     = "/dev/ttyACM0"
-baudrate = 115200
+enabled  = true
+port     = "/dev/ttyUSB0"
+baudrate = 4800    # confirmed on RPi5 /dev/ttyUSB0

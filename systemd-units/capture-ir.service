@@ -1,0 +1,12 @@
+[Unit]
+Description=VIGIA 2.0 — capture IR image (Optris Pi 640i)
+Wants=capture-ir.timer
+
+[Service]
+User=user
+Type=oneshot
+WorkingDirectory=/home/user
+ExecStart=/home/user/.venv/bin/multicamctl capture infrared
+
+[Install]
+WantedBy=multi-user.target

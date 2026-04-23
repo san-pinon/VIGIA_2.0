@@ -1,0 +1,11 @@
+[Unit]
+Description=VIGIA 2.0 — trigger visible capture every minute
+Requires=capture-vis.service
+
+[Timer]
+Unit=capture-vis.service
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

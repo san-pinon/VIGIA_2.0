@@ -11,12 +11,13 @@ version = "0.1.0"
 description = "VIGIA 2.0 system: a multi-spectral camera system for volcanology."
 readme = "README.md"
 license = {text = "GPLv3"}
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 authors = [
     {name = "Conor Bacon", email = "conor.bacon@gmail.com"}
 ]
 maintainers = [
-    {name = "Conor Bacon", email = "conor.bacon@gmail.com"}
+    {name = "Conor Bacon", email = "conor.bacon@gmail.com"},
+    {name = "Santiago Piñón", email = "santiagopinonj@gmail.com"}
 ]
 keywords = ["volcanology", "data", "science", "instrumentation", "cameras"]
 classifiers = [

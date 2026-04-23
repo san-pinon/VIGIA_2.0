@@ -1,0 +1,12 @@
+[Unit]
+Description=VIGIA 2.0 — capture environmental reading (BME280 / SHT30)
+Wants=capture-env.timer
+
+[Service]
+User=user
+Type=oneshot
+WorkingDirectory=/home/user
+ExecStart=/home/user/.venv/bin/multicamctl capture environmental
+
+[Install]
+WantedBy=multi-user.target

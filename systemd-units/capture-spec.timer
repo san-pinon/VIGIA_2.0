@@ -1,0 +1,11 @@
+[Unit]
+Description=VIGIA 2.0 — trigger spectrometer capture every 10 minutes
+Requires=capture-spec.service
+
+[Timer]
+Unit=capture-spec.service
+OnCalendar=*-*-* *:*:00/10
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

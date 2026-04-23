@@ -16,11 +16,9 @@ Interface: Linux I2C via smbus2.
 from __future__ import annotations
 
 import time
-from typing import Any
 
 from multicam.drivers import CaptureResult
 from multicam.errors import CaptureFailure
-
 
 try:
     from smbus2 import SMBus, i2c_msg
@@ -105,7 +103,7 @@ class SHT30:
         except Exception:
             pass
 
-    def __enter__(self) -> "SHT30":
+    def __enter__(self) -> SHT30:
         return self
 
     def __exit__(self, exception_type, exception_value, exception_traceback) -> None:

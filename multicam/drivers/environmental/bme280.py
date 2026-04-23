@@ -18,11 +18,9 @@ from __future__ import annotations
 
 import struct
 import time
-from typing import Any, Mapping
 
 from multicam.drivers import CaptureResult
 from multicam.errors import CaptureFailure
-
 
 try:
     from smbus2 import SMBus
@@ -77,6 +75,7 @@ class BME280:
                 "smbus2 is not installed; cannot use BME280 driver."
             ) from _SMBUS2_IMPORT_ERROR
 
+        self._bus_num = i2c_bus
         self._bus = SMBus(i2c_bus)
         self._addr = address
         self._closed = False
@@ -106,14 +105,14 @@ class BME280:
         except Exception:
             pass
 
-    def __enter__(self) -> "BME280":
+    def __enter__(self) -> BME280:
         return self
 
     def __exit__(self, exception_type, exception_value, exception_traceback) -> None:
         self.shutdown()
 
     def __str__(self) -> str:
-        return f"BME280(bus={self._bus._fd}, addr=0x{self._addr:02X})"
+        return f"BME280(bus={self._bus_num}, addr=0x{self._addr:02X})"
 
     # ------------------------------------------------------------------
     # Initialisation helpers

@@ -1,0 +1,11 @@
+[Unit]
+Description=VIGIA 2.0 — trigger IR capture every minute
+Requires=capture-ir.service
+
+[Timer]
+Unit=capture-ir.service
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
