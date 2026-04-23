@@ -1,10 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+
+# Linter / formatter caches
 .ruff_cache/
+
+# OS
 .DS_Store
+
+# Local dev / Claude Code
 .claude/
+CLAUDE.md
+
+# Dev notes and install guide (not for distribution)
+TODO.md
+info-TODO.md
+INSTALL.md
+
+# Legacy / private directories
 .extra/
 .systems/
-CLAUDE.md
-build/
-.venv/
-*.egg-info/
-
