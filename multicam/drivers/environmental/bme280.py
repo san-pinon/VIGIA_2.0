@@ -35,15 +35,15 @@ else:
 # Register addresses (BME280 datasheet Table 18)
 # ---------------------------------------------------------------------------
 
-_REG_ID = 0xD0           # Chip ID — should read 0x60
-_REG_RESET = 0xE0        # Write 0xB6 for soft reset
-_REG_CTRL_HUM = 0xF2     # Humidity oversampling
-_REG_STATUS = 0xF3       # Measuring / updating flags
-_REG_CTRL_MEAS = 0xF4    # Temperature + pressure oversampling, mode
-_REG_CONFIG = 0xF5       # Standby time, filter, SPI 3-wire
-_REG_DATA = 0xF7         # Start of 8-byte raw data burst
-_REG_CALIB_00 = 0x88     # Start of trimming registers block 1 (24 bytes)
-_REG_CALIB_26 = 0xE1     # Start of trimming registers block 2 (7 bytes)
+_REG_ID = 0xD0  # Chip ID — should read 0x60
+_REG_RESET = 0xE0  # Write 0xB6 for soft reset
+_REG_CTRL_HUM = 0xF2  # Humidity oversampling
+_REG_STATUS = 0xF3  # Measuring / updating flags
+_REG_CTRL_MEAS = 0xF4  # Temperature + pressure oversampling, mode
+_REG_CONFIG = 0xF5  # Standby time, filter, SPI 3-wire
+_REG_DATA = 0xF7  # Start of 8-byte raw data burst
+_REG_CALIB_00 = 0x88  # Start of trimming registers block 1 (24 bytes)
+_REG_CALIB_26 = 0xE1  # Start of trimming registers block 2 (7 bytes)
 
 # Forced mode: take one measurement, then return to sleep.
 _MODE_FORCED = 0b01
@@ -211,9 +211,7 @@ class BME280:
         """Return (temperature °C, t_fine) where t_fine is reused by P/H."""
 
         var1 = (adc_T / 16384.0 - self._dig_T1 / 1024.0) * self._dig_T2
-        var2 = (
-            (adc_T / 131072.0 - self._dig_T1 / 8192.0) ** 2 * self._dig_T3
-        )
+        var2 = (adc_T / 131072.0 - self._dig_T1 / 8192.0) ** 2 * self._dig_T3
         t_fine = int(var1 + var2)
         temperature = (var1 + var2) / 5120.0
         return temperature, t_fine

@@ -35,7 +35,7 @@ else:
 # disabled — datasheet Table 8).
 # ---------------------------------------------------------------------------
 
-_CMD_MEAS_HIGH = [0x24, 0x00]   # Single-shot, high repeatability
+_CMD_MEAS_HIGH = [0x24, 0x00]  # Single-shot, high repeatability
 
 # Measurement duration for high repeatability: ≤15 ms (datasheet Table 4).
 _MEAS_DELAY_S = 0.020

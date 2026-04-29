@@ -34,9 +34,7 @@ def _write_reading(timestamp: dt, readings: dict, config: dict) -> None:
     julday = int(timestamp.strftime("%j"))
     time_str = timestamp.strftime("%H%M%S")
 
-    fname = (
-        f"{meta['vnum']}.{meta['site_code']}.{year}.{julday:03d}_{time_str}.json"
-    )
+    fname = f"{meta['vnum']}.{meta['site_code']}.{year}.{julday:03d}_{time_str}.json"
     dest = (
         pathlib.Path(config["metadata"]["data_archive"])
         / "environmental"
@@ -52,7 +50,7 @@ def _write_reading(timestamp: dt, readings: dict, config: dict) -> None:
     dest.write_text(json.dumps(payload, indent=2))
 
 
-def capture_environmental(config: dict) -> None:
+def capture_environmental(config: dict, extra_args: list[str] | None = None) -> None:
     """
     Handle queries to environmental sensors attached to the multicam system.
 

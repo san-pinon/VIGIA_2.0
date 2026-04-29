@@ -211,9 +211,7 @@ def capture(spectrometer: Spectrometer, settings: dict | None = None) -> Capture
     _ = spectrometer.spectrometer.intensities()
 
     spectra_stack = (
-        np.add.reduce(
-            [spectrometer.spectrometer.intensities() for _ in range(n_stack)]
-        )
+        np.add.reduce([spectrometer.spectrometer.intensities() for _ in range(n_stack)])
         / n_stack
     )
 

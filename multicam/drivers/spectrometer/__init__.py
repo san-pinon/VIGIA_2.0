@@ -49,13 +49,12 @@ def _write_wavelengths(timestamp: dt, wavelengths: np.ndarray, config: dict) -> 
     julday = int(timestamp.strftime("%j"))
     time_str = timestamp.strftime("%H%M%S")
 
-    fname = (
-        f"{meta['vnum']}.{meta['site_code']}.{year}.{julday:03d}_{time_str}_wavelengths.npy"
-    )
+    base = f"{meta['vnum']}.{meta['site_code']}.{year}.{julday:03d}"
+    fname = f"{base}_{time_str}_wavelengths.npy"
     np.save(_receive_dir(config) / fname, wavelengths)
 
 
-def capture_spectra(config: dict) -> None:
+def capture_spectra(config: dict, extra_args: list[str] | None = None) -> None:
     """
     Handle queries to a spectrometer attached to the multicam system.
 

@@ -67,7 +67,7 @@ def _write_images(
     cv2.imwrite(str(name_2), result_2.artifacts["image"])
 
 
-def capture_image(config: dict) -> None:
+def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
     """
     Handle queries to the UV dual-camera system attached to the Raspberry Pi 5.
 

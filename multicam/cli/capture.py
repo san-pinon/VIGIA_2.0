@@ -12,18 +12,22 @@ import argparse
 import pathlib
 import sys
 
+from multicam.drivers.dslr import capture_dslr
 from multicam.drivers.environmental import capture_environmental
 from multicam.drivers.infrared import capture_image as capture_ir_image
 from multicam.drivers.spectrometer import capture_spectra
 from multicam.drivers.ultraviolet import capture_image as capture_uv_images
+from multicam.drivers.uv_sync import capture_uv_sync
 from multicam.drivers.visible import capture_image as capture_vis_image
 from multicam.utilities import read_config
 
 FN_MAP = {
+    "dslr": capture_dslr,
     "environmental": capture_environmental,
     "infrared": capture_ir_image,
     "spectrometer": capture_spectra,
     "ultraviolet": capture_uv_images,
+    "uv-sync": capture_uv_sync,
     "visible": capture_vis_image,
 }
 
@@ -48,7 +52,7 @@ def image_capture_handler(args=None):
         required=False,
         default=pathlib.Path.home() / ".config/multicam_config.toml",
     )
-    args = parser.parse_args(sys.argv[2:])
+    args, remaining = parser.parse_known_args(sys.argv[2:])
 
     config = read_config(pathlib.Path(args.config))
 
@@ -56,4 +60,4 @@ def image_capture_handler(args=None):
     (data_dir / "receive").mkdir(exist_ok=True, parents=True)
 
     # --- Map arguments to appropriate instrument driver ---
-    FN_MAP[args.instrument](config)
+    FN_MAP[args.instrument](config, remaining)

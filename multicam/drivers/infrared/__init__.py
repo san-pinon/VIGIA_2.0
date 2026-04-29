@@ -9,7 +9,10 @@ Collection of drivers for IR camera systems.
 
 """
 
+import argparse
+import json
 import pathlib
+import sys
 from datetime import UTC
 from datetime import datetime as dt
 from datetime import timedelta as td
@@ -18,6 +21,7 @@ import cv2
 import numpy as np
 
 from multicam.errors import CaptureFailure
+from multicam.utilities.naming import build_filename
 
 from .optris import (
     Camera as OptrisCamera,
@@ -30,37 +34,47 @@ from .optris import (
 )
 
 
-def _write_image(
-    timestamp: dt, image: np.ndarray, archive: pathlib.Path, config: dict
-) -> None:
-    """Utility function that writes an image to file."""
+def _check_thermal_saturation(
+    thermal_frame: np.ndarray,
+    t_max: float,
+    threshold: float = 0.05,
+) -> bool:
+    """
+    Check if a thermal frame is saturated.
 
-    metadata = config["metadata"]
+    Parameters
+    ----------
+    thermal_frame:
+        Raw uint16 thermal data from the Optris camera.
+    t_max:
+        Maximum temperature (°C) of the sensor range.
+    threshold:
+        Fraction of pixels at or above T_max to trigger a warning.
 
-    julday = timestamp.timetuple().tm_yday
+    Returns
+    -------
+    saturated:
+        ``True`` if more than ``threshold`` fraction of pixels are at T_max.
 
-    print("      ...writing image to file...")
-    frame, frame_loop = 0, True
-    while frame_loop:
-        image_name = (
-            archive
-            / "receive"
-            / (
-                f"{metadata['vnum']}.{metadata['site_code']}.{timestamp.year}.{julday:03d}_"
-                f"{timestamp.hour:02d}{timestamp.minute:02d}{timestamp.second:02d}"
-                f"-{frame:04d}.png"
-            )
-        )
+    """
 
-        if image_name.is_file():
-            frame += 1
-            continue
-        break
-
-    cv2.imwrite(str(image_name), image)
+    temp_frame = (thermal_frame.astype(np.float64) - 1000.0) / 10.0
+    fraction_at_max = np.mean(temp_frame >= t_max)
+    return bool(fraction_at_max > threshold)
 
 
-def capture_image(config: dict) -> None:
+def _thermal_stats(thermal_frame: np.ndarray) -> dict:
+    """Compute min/max/mean temperature from raw Optris uint16 values."""
+
+    temp_frame = (thermal_frame.astype(np.float64) - 1000.0) / 10.0
+    return {
+        "temperature_min_c": round(float(temp_frame.min()), 1),
+        "temperature_max_c": round(float(temp_frame.max()), 1),
+        "temperature_mean_c": round(float(temp_frame.mean()), 1),
+    }
+
+
+def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
     """
     Handles queries to IR cameras attached to the multicam system.
 
@@ -68,8 +82,18 @@ def capture_image(config: dict) -> None:
     ----------
     config:
         Camera configuration information.
+    extra_args:
+        Additional CLI flags: ``--check-saturation``, ``--output-dir``,
+        ``--max-retries``.
 
     """
+
+    # --- Parse extra flags ---
+    flag_parser = argparse.ArgumentParser(add_help=False)
+    flag_parser.add_argument("--check-saturation", action="store_true", default=False)
+    flag_parser.add_argument("--output-dir", type=str, default=None)
+    flag_parser.add_argument("--max-retries", type=int, default=3)
+    flags = flag_parser.parse_args(extra_args or [])
 
     instrument_config = config["infrared"]
 
@@ -83,13 +107,24 @@ def capture_image(config: dict) -> None:
 
     time_between_frames = 1.0 / instrument_config["framerate"]
 
+    if flags.output_dir:
+        archive = pathlib.Path(flags.output_dir)
+    else:
+        archive = pathlib.Path(config["metadata"]["data_archive"]) / "infrared"
+    (archive / "receive").mkdir(parents=True, exist_ok=True)
+
+    metadata_cfg = config["metadata"]
+    t_max = float(instrument_config.get("t_max", 900.0))
+    sat_threshold = float(instrument_config.get("saturation_pixel_threshold", 0.05))
+
     frames, starttime = 0, dt.now(UTC)
+    summaries: list[dict] = []
+
     try:
         print("   ...entering capture loop...")
         while frames < instrument_config["frame_count"]:
             utcnow = dt.now(UTC)
 
-            # Capture first frame immediately; then wait for the frame interval.
             if utcnow < starttime + td(seconds=time_between_frames) and frames != 0:
                 continue
 
@@ -99,20 +134,61 @@ def capture_image(config: dict) -> None:
                 camera.close()
                 raise
 
-            image = capture_result.artifacts["image"]
+            raw_thermal = capture_result.artifacts["image"]
+            stats = _thermal_stats(raw_thermal)
 
+            saturation_warning = False
+            if flags.check_saturation:
+                saturation_warning = _check_thermal_saturation(
+                    raw_thermal, t_max, sat_threshold
+                )
+                if saturation_warning:
+                    print(
+                        "      WARNING: THERMAL_SATURATION_WARNING — "
+                        f">{sat_threshold * 100:.0f}% of pixels at T_max ({t_max}°C)"
+                    )
+
+            # Save 16-bit TIFF (raw thermal data)
+            tiff_name = build_filename(
+                metadata_cfg, utcnow, extension="tiff", frame=frames
+            )
+            tiff_path = archive / "receive" / tiff_name
+            cv2.imwrite(str(tiff_path), raw_thermal)
+
+            # Also save the false-colour image for quick inspection
             if instrument_config["model"] == "optris":
-                image = _convert_temp2image(image)
+                colour_image = _convert_temp2image(raw_thermal)
+                colour_name = build_filename(
+                    metadata_cfg, utcnow, suffix="colour", extension="png", frame=frames
+                )
+                cv2.imwrite(str(archive / "receive" / colour_name), colour_image)
 
-            _write_image(
-                utcnow,
-                image,
-                pathlib.Path(config["metadata"]["data_archive"]) / "infrared",
-                config,
+            # Write metadata JSON
+            meta_name = build_filename(
+                metadata_cfg, utcnow, suffix="metadata", extension="json", frame=frames
+            )
+            meta_payload = {
+                "timestamp_utc": utcnow.isoformat(),
+                **stats,
+                "saturation_warning": saturation_warning,
+                "files": {"thermal_tiff": tiff_name},
+            }
+            (archive / "receive" / meta_name).write_text(
+                json.dumps(meta_payload, indent=2)
             )
 
+            summaries.append(meta_payload)
             starttime += td(seconds=time_between_frames)
             frames += 1
+
         print("...capture sequence complete. Shutting down.")
     finally:
         camera.close()
+
+    summary = {
+        "instrument": "infrared",
+        "frames_captured": frames,
+        "captures": summaries,
+    }
+    print(json.dumps(summary))
+    sys.exit(0)

@@ -55,7 +55,7 @@ def _write_image(
     cv2.imwrite(str(image_name), image)
 
 
-def capture_image(config: dict) -> None:
+def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
     """
     Handles queries to visible cameras attached to the multicam system.
 

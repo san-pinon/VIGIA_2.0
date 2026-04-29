@@ -30,6 +30,8 @@ xml_path    = "/usr/share/libirimager/cali/Cali-24062074.xml"   # Sensor calibra
 log_path    = "/home/user/logs/thermal"
 framerate   = 1     # Hz — frames per second requested
 frame_count = 1     # Number of frames captured per invocation
+t_max       = 900.0                # °C — sensor max temperature for saturation check
+saturation_pixel_threshold = 0.05  # Fraction of pixels at T_max to trigger warning
 
 # ---------------------------------------------------------------------------
 # Visible-spectrum camera                                  IMPLEMENTED (picam)
@@ -74,7 +76,7 @@ start_delay_s      = 0.5     # Warm-up delay after camera start() before first c
 [ultraviolet.controls]
 # libcamera control overrides applied to both UV cameras.
 # Tune ExposureTime (µs) on-site to achieve ~50–70 % well fill.
-# ExposureTime = 50000
+# ExposureTime = 500000
 # AnalogueGain = 1.0
 
 # ---------------------------------------------------------------------------
@@ -99,8 +101,7 @@ framerate           = 0.016    # Hz (~1 measurement per minute)
 #
 # SHT30  — temperature, relative humidity
 #   Interface: I2C (smbus2) | Default address: 0x44 (ADDR low) / 0x45 (ADDR high)
-#   *** HARDWARE ISSUE: SHT30 not detected on any I2C bus — likely bad soldering.
-#   *** Keep enabled = false until confirmed on i2cdetect -y 1 (look for 0x44).
+#   Confirmed: detected at 0x44 on bus 1 after resoldering.
 # ---------------------------------------------------------------------------
 
 [environmental.bme280]
@@ -109,7 +110,7 @@ i2c_bus  = 1       # Linux I2C bus number (/dev/i2c-1)
 address  = 0x77    # SDO pin pulled high on this unit
 
 [environmental.sht30]
-enabled  = false   # DISABLED: sensor not detected — see note above
+enabled  = true    # Re-enabled after resoldering confirmed detection at 0x44
 i2c_bus  = 1
 address  = 0x44
 
@@ -129,3 +130,37 @@ sampling_interval_s = 60   # Seconds between readings (for daemon/loop use)
 enabled  = true
 port     = "/dev/ttyUSB0"
 baudrate = 4800    # confirmed on RPi5 /dev/ttyUSB0
+
+# ---------------------------------------------------------------------------
+# UV-sync — synchronized UV cameras + spectrometer capture    IMPLEMENTED
+# Runs on uvcam (RPi5). Uses threading.Barrier for simultaneous trigger.
+# ---------------------------------------------------------------------------
+
+[uv_sync]
+output_dir    = "/home/user/data/uv/"
+default_stack = 5       # Number of spectra to co-add
+max_retries   = 3        # Saturation retry limit
+
+# ---------------------------------------------------------------------------
+# DSLR — picam-metered Canon capture                          IMPLEMENTED
+# Runs on multicam (SBC). Picam meters scene, Canon fires final shot.
+# ---------------------------------------------------------------------------
+
+[dslr]
+output_dir           = "/home/user/data/dslr/"
+picam_output_dir     = "/home/user/data/picam/"
+max_meter_iterations = 5
+target_p95           = 204    # 80% of 255
+tolerance_pct        = 10     # ±10% of target_p95
+
+# ---------------------------------------------------------------------------
+# Orchestrator — capture cycle coordinator                    IMPLEMENTED
+# Runs on uvcam (RPi5). SSHes into multicam for IR and DSLR captures.
+# ---------------------------------------------------------------------------
+
+[orchestrator]
+interval_s      = 60
+multicam_host   = "192.168.30.150"
+multicam_user   = "user"
+remote_venv_bin = "/home/user/.venv/bin/multicamctl"
+log_path        = "/home/user/logs/orchestrator.log"

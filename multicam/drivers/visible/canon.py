@@ -36,7 +36,6 @@ else:
     _GPHOTO2_IMPORT_ERROR = None
 
 
-
 class Camera:
     """
     Long-lived Canon DSLR controller via python-gphoto2.
