@@ -56,12 +56,12 @@ def _write_images(
     print("      ...writing UV images to file...")
     frame = 0
     while True:
-        name_1 = archive / f"{base}-{frame:04d}-{ch1}.png"
+        name_1 = archive / f"{base}-{frame:04d}-{ch1}.tiff"
         if not name_1.is_file():
             break
         frame += 1
 
-    name_2 = archive / f"{base}-{frame:04d}-{ch2}.png"
+    name_2 = archive / f"{base}-{frame:04d}-{ch2}.tiff"
 
     cv2.imwrite(str(name_1), result_1.artifacts["image"])
     cv2.imwrite(str(name_2), result_2.artifacts["image"])

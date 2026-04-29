@@ -136,7 +136,7 @@ class BME280:
             self._dig_P7,
             self._dig_P8,
             self._dig_P9,
-        ) = struct.unpack_from("<HhhHhhhhhhhhh", bytes(b1))[:12]
+        ) = struct.unpack_from("<HhhHhhhhhhhh", bytes(b1))
 
         # Block 1 byte 25 (0xA1) — H1
         self._dig_H1 = self._bus.read_byte_data(self._addr, 0xA1)

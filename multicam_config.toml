@@ -88,7 +88,7 @@ start_delay_s      = 0.5     # Warm-up delay after camera start() before first c
 
 [spectrometer]
 model               = "oceaninsight"
-integration_time_us = 100000   # µs — confirmed within [3800, 10000000]
+integration_time_us = 400000   # µs — confirmed within [3800, 10000000]
 stacking            = 5        # Number of spectra averaged per measurement
 frame_count         = 1        # Measurements per CLI invocation
 framerate           = 0.016    # Hz (~1 measurement per minute)
