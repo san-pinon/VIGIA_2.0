@@ -24,7 +24,7 @@ import numpy as np
 
 from multicam.drivers.visible.canon import Camera as CanonCamera
 from multicam.drivers.visible.canon import capture as capture_canon
-from multicam.drivers.visible.picam import Camera as PiCamera
+from multicam.drivers.visible.v4l2cam import Camera as V4L2Camera
 from multicam.errors import CaptureFailure
 from multicam.utilities.naming import build_filename
 
@@ -102,7 +102,7 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
     # --- Metering with picam ---
     if flags.meter_with and not (flags.iso and flags.shutter):
         print("Metering scene with picam...")
-        picam = PiCamera(vis_config)
+        picam = V4L2Camera(vis_config)
         try:
             iso, shutter_str, last_picam_frame = meter_scene(
                 picam,

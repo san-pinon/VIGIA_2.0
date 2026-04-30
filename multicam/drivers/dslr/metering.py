@@ -1,7 +1,7 @@
 """
-Histogram-based metering for Canon DSLR capture using a Raspberry Pi camera.
+Histogram-based metering for Canon DSLR capture using the Arducam (V4L2).
 
-The metering loop captures frames from a picam, computes the 95th percentile
+The metering loop captures frames from the USB camera, computes the 95th percentile
 brightness, and iteratively adjusts shutter speed and ISO to reach a target
 exposure level before firing the Canon.
 
@@ -21,8 +21,8 @@ from fractions import Fraction
 import cv2
 import numpy as np
 
-from multicam.drivers.visible.picam import Camera as PiCamera
-from multicam.drivers.visible.picam import capture as capture_picam
+from multicam.drivers.visible.v4l2cam import Camera as V4L2Camera
+from multicam.drivers.visible.v4l2cam import capture as capture_v4l2
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ def _step_iso(current_iso: int, direction: int) -> int:
 
 
 def meter_scene(
-    picam: PiCamera,
+    picam: V4L2Camera,
     initial_iso: int = 800,
     initial_shutter: str = "1/250",
     target_p95: int = 204,
@@ -124,7 +124,7 @@ def meter_scene(
     hi = target_p95 * (1 + tolerance)
 
     for iteration in range(max_iterations):
-        result = capture_picam(picam)
+        result = capture_v4l2(picam)
         frame = result.artifacts["image"]
         last_frame = frame
 
