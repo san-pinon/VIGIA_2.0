@@ -30,6 +30,27 @@ EOS_ISO_VALUES = [100, 200, 400, 800, 1600, 3200, 6400]
 SHUTTER_MIN = Fraction(1, 4000)
 SHUTTER_MAX = Fraction(30, 1)
 
+# Valid shutter speed strings accepted by the EOS 4000D via gphoto2.
+EOS_SHUTTER_STRINGS = [
+    "1/4000", "1/3200", "1/2500", "1/2000", "1/1600", "1/1250", "1/1000",
+    "1/800", "1/640", "1/500", "1/400", "1/320", "1/250", "1/200", "1/160",
+    "1/125", "1/100", "1/80", "1/60", "1/50", "1/40", "1/30", "1/25", "1/20",
+    "1/15", "1/13", "1/10", "1/8", "1/6", "1/5", "1/4", "0.3", "0.4", "0.5",
+    "0.6", "0.8", "1", "1.3", "1.6", "2", "2.5", "3.2", "4", "5", "6", "8",
+    "10", "13", "15", "20", "25", "30",
+]
+
+# Pre-computed as floats for fast nearest-neighbour lookup.
+_EOS_SHUTTER_FLOATS = [float(Fraction(s)) for s in EOS_SHUTTER_STRINGS]
+
+
+def _quantize_shutter(shutter: Fraction) -> str:
+    """Snap a computed shutter speed to the nearest valid EOS 4000D gphoto2 string."""
+
+    target = float(shutter)
+    idx = min(range(len(_EOS_SHUTTER_FLOATS)), key=lambda i: abs(_EOS_SHUTTER_FLOATS[i] - target))
+    return EOS_SHUTTER_STRINGS[idx]
+
 
 def _parse_shutter(shutter_str: str) -> Fraction:
     """Convert a shutter speed string like ``'1/250'`` to a Fraction."""
@@ -162,4 +183,4 @@ def meter_scene(
         else:
             shutter = new_shutter
 
-    return iso, _shutter_to_str(shutter), last_frame
+    return iso, _quantize_shutter(shutter), last_frame
