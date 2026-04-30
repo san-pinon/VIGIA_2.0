@@ -79,6 +79,11 @@ class DualCamera:
             self.camera_1 = PiCamera(config["camera_1_port"])
             self.camera_2 = PiCamera(config["camera_2_port"])
 
+            # Configure with a still configuration that includes the raw stream
+            # so capture_array("raw") returns linear 10-bit Bayer data.
+            self.camera_1.configure(self.camera_1.create_still_configuration(raw={}))
+            self.camera_2.configure(self.camera_2.create_still_configuration(raw={}))
+
             controls = config.get("controls", {})
             if controls:
                 self.camera_1.set_controls(dict(controls))
@@ -151,12 +156,12 @@ def capture(
     """
 
     try:
-        image_1 = cameras.camera_1.capture_array()
+        image_1 = cameras.camera_1.capture_array("raw")
     except Exception as e:
         raise CaptureFailure(f"UV camera_1 capture failed: {e}") from e
 
     try:
-        image_2 = cameras.camera_2.capture_array()
+        image_2 = cameras.camera_2.capture_array("raw")
     except Exception as e:
         raise CaptureFailure(f"UV camera_2 capture failed: {e}") from e
 
@@ -167,6 +172,8 @@ def capture(
             "ts_monotonic_ns": ts,
             "port": cameras._config.get("camera_1_port"),
             "filter_nm": cameras._config.get("camera_1_filter_nm", 310),
+            "stream": "raw",
+            "bit_depth": 10,
             "shape": tuple(image_1.shape),
             "dtype": str(image_1.dtype),
         },
@@ -177,6 +184,8 @@ def capture(
             "ts_monotonic_ns": ts,
             "port": cameras._config.get("camera_2_port"),
             "filter_nm": cameras._config.get("camera_2_filter_nm", 330),
+            "stream": "raw",
+            "bit_depth": 10,
             "shape": tuple(image_2.shape),
             "dtype": str(image_2.dtype),
         },
