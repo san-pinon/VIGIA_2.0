@@ -21,8 +21,8 @@ from multicam.errors import CaptureFailure
 
 from .canon import Camera as CanonCamera
 from .canon import capture as capture_canon
-from .picam import Camera as PiCamera
-from .picam import capture as capture_picam
+from .v4l2cam import Camera as V4L2Camera
+from .v4l2cam import capture as capture_v4l2
 
 
 def _write_image(
@@ -70,12 +70,12 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
 
     print("Capturing images...")
     match instrument_config["model"]:
-        case "picam":
-            camera = PiCamera(instrument_config)
-            capture_fn = capture_picam
         case "canon":
             camera = CanonCamera(instrument_config)
             capture_fn = capture_canon
+        case "v4l2":
+            camera = V4L2Camera(instrument_config)
+            capture_fn = capture_v4l2
         case _:
             raise ValueError("Invalid camera model.")
 

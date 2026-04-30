@@ -7,7 +7,7 @@ Register map and compensation formulas follow the BME280 datasheet
 Interface: Linux I2C via smbus2.
 
 :copyright:
-    2026, Conor A. Bacon.
+    2026, Santiago Pinon.
 :license:
     GNU General Public License, Version 3
     (https://www.gnu.org/licenses/gpl-3.0.html)

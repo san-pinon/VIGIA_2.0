@@ -36,15 +36,17 @@ saturation_pixel_threshold = 0.05  # Fraction of pixels at T_max to trigger warn
 # ---------------------------------------------------------------------------
 # Visible-spectrum camera                                  IMPLEMENTED (picam)
 #                                                          WIP (canon)
-# model = "picam"  → Raspberry Pi Camera Module via libcamera / picamera2
+# model = "v4l2"   → USB/UVC camera via V4L2 / OpenCV VideoCapture (SBC)
 # model = "canon"  → Canon DSLR via python-gphoto2
 # ---------------------------------------------------------------------------
 
 [visible]
-model       = "picam"   # "picam" | "canon"
+model       = "v4l2"    # "v4l2" | "canon"
 framerate   = 5
 frame_count = 10
-camera_port = 0         # /dev/video index (picam only)
+camera_port = 0         # /dev/videoN index (picam and v4l2)
+# width  = 4056         # optional: force capture resolution (v4l2 only)
+# height = 3040         # optional: force capture resolution (v4l2 only)
 
 [visible.controls]
 # libcamera control overrides (picam only).  Key names match the

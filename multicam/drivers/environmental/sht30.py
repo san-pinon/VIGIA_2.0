@@ -6,7 +6,7 @@ Protocol follows the SHT3x-DIS datasheet (version 6, section 4).
 Interface: Linux I2C via smbus2.
 
 :copyright:
-    2026, Conor A. Bacon.
+    2026, Santiago Pinon.
 :license:
     GNU General Public License, Version 3
     (https://www.gnu.org/licenses/gpl-3.0.html)
@@ -184,8 +184,8 @@ def capture(sensor: SHT30, settings: dict | None = None) -> CaptureResult:
 
     .. code-block::
 
-        T [°C]  = -45 + 175 × S_T  / (2^16 − 1)
-        RH [%]  = 100 × S_RH / (2^16 − 1)
+        T [°C]  = -45 + 175 × S_T  / (2^16 - 1)
+        RH [%]  = 100 × S_RH / (2^16 - 1)
 
     Parameters
     ----------

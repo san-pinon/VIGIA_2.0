@@ -6,7 +6,7 @@ Supported hardware:
 - Sensirion SHT30 — temperature, relative humidity (I2C)
 
 :copyright:
-    2026, Conor A. Bacon.
+    2026, Santiago Pinon.
 :license:
     GNU General Public License, Version 3
     (https://www.gnu.org/licenses/gpl-3.0.html)

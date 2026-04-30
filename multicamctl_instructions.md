@@ -10,7 +10,7 @@ Two computers connected via a local router (192.168.30.0/24):
 | OnLogic SBC | `multicam` | 192.168.30.150 | IR camera + Canon DSLR + picam |
 
 Both machines run a CLI called `multicamctl` installed in `/home/user/.venv/bin/multicamctl`.  
-The orchestrator script runs on `multicam` and coordinates captures across both machines via SSH.
+The orchestrator script runs on `uvcam` and coordinates captures across both machines via SSH.
 
 ### multicamctl subcommands to implement for `uvcam`
 
