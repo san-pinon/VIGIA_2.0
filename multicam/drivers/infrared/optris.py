@@ -45,6 +45,44 @@ class EvoIRFrameMetadata(ctypes.Structure):
     ]
 
 
+# --- Declare ctypes prototypes so argument marshalling is correct on x86_64 ---
+LIBIR.evo_irimager_usb_init.argtypes = [
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+]
+LIBIR.evo_irimager_usb_init.restype = ctypes.c_int
+
+LIBIR.evo_irimager_terminate.argtypes = []
+LIBIR.evo_irimager_terminate.restype = ctypes.c_int
+
+LIBIR.evo_irimager_get_thermal_image_size.argtypes = [
+    ctypes.POINTER(ctypes.c_int),
+    ctypes.POINTER(ctypes.c_int),
+]
+LIBIR.evo_irimager_get_thermal_image_size.restype = ctypes.c_int
+
+LIBIR.evo_irimager_get_palette_image_size.argtypes = [
+    ctypes.POINTER(ctypes.c_int),
+    ctypes.POINTER(ctypes.c_int),
+]
+LIBIR.evo_irimager_get_palette_image_size.restype = ctypes.c_int
+
+LIBIR.evo_irimager_trigger_shutter_flag.argtypes = []
+LIBIR.evo_irimager_trigger_shutter_flag.restype = ctypes.c_int
+
+LIBIR.evo_irimager_get_thermal_palette_image_metadata.argtypes = [
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.POINTER(ctypes.c_ushort),
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.POINTER(ctypes.c_ubyte),
+    ctypes.POINTER(EvoIRFrameMetadata),
+]
+LIBIR.evo_irimager_get_thermal_palette_image_metadata.restype = ctypes.c_int
+
+
 class Camera:
     """
     Long-lived camera controller.
@@ -63,9 +101,14 @@ class Camera:
         self.metadata = EvoIRFrameMetadata()
 
         # Terminate any stale irdirectsdk session before initialising.
+        # Use the C call directly — self.close() guards on _closed which
+        # is not meaningful before init; terminate() on a clean process is
+        # documented as a safe no-op but we guard anyway.
         self._closed = False
-        self.close()
-        self._closed = False
+        try:
+            LIBIR.evo_irimager_terminate()
+        except Exception:
+            pass
 
         ret = LIBIR.evo_irimager_usb_init(xml_path, formats_def_path, log_path)
         if ret != 0:
@@ -186,11 +229,11 @@ def capture(camera: Camera) -> CaptureResult:
     LIBIR.evo_irimager_trigger_shutter_flag()
     while count < 1000:
         ret = LIBIR.evo_irimager_get_thermal_palette_image_metadata(
-            camera.thermal_width,
-            camera.thermal_height,
+            camera.thermal_width.value,
+            camera.thermal_height.value,
             thermal_data_p,
-            camera.palette_width,
-            camera.palette_height,
+            camera.palette_width.value,
+            camera.palette_height.value,
             image_data_p,
             ctypes.byref(camera.metadata),
         )
