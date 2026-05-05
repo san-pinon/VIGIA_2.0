@@ -224,17 +224,14 @@ def capture(camera: Camera) -> CaptureResult:
     )
     image_data_p = image_data.ctypes.data_as(ctypes.POINTER(ctypes.c_ubyte))
 
-    # Wait for a flag cycle then stable flagState==0 (normal operation).
-    # Matches the working toughbook capture.py strategy:
-    #   1. Poll until we see flagState != 0 (flag/NUC active)
-    #   2. Then collect 10 consecutive flagState == 0 frames (stable post-NUC)
-    # If the cycle never completes (e.g. flagState stuck at 5 on some firmware
-    # versions), fall back to a direct grab of the first valid ret==0 frame.
-    flag_seen = False
-    stable = 0
-    max_wait = 2000  # ~66 s at 30 fps before giving up on the flag cycle
-
-    for _ in range(max_wait):
+    # On libirimager 8.8.5 the post-NUC frame is flat (the NUC collapses
+    # scene data rather than correcting it). Pre-NUC frames carry real scene
+    # content, so we skip frames while the flag/NUC is active (flagState != 0)
+    # and return the very first stable flagState==0 frame — i.e. the frame
+    # immediately after init, before the next NUC cycle is triggered.
+    # We do NOT call trigger_shutter_flag() so we don't kick off a NUC
+    # ourselves; we just grab whatever the camera is currently delivering.
+    for _ in range(1000):
         ret = LIBIR.evo_irimager_get_thermal_palette_image_metadata(
             camera.thermal_width.value,
             camera.thermal_height.value,
@@ -247,38 +244,14 @@ def capture(camera: Camera) -> CaptureResult:
         if ret != 0:
             time.sleep(0.002)
             continue
+        # Skip frames during NUC/flag cycle
         if camera.metadata.flagState != 0:
-            flag_seen = True
-            stable = 0
-        elif flag_seen:
-            stable += 1
-            if stable >= 10:
-                break
+            continue
+        break
+    else:
+        raise CaptureFailure
 
-    if stable < 10:
-        # Flag cycle did not complete — firmware quirk (e.g. flagState stuck at
-        # a non-zero value). Attempt a direct grab of the first valid frame.
-        print(
-            f"WARNING: flag cycle incomplete (last flagState={camera.metadata.flagState}); "
-            "falling back to direct frame grab"
-        )
-        for _ in range(1000):
-            ret = LIBIR.evo_irimager_get_thermal_palette_image_metadata(
-                camera.thermal_width.value,
-                camera.thermal_height.value,
-                thermal_data_p,
-                camera.palette_width.value,
-                camera.palette_height.value,
-                image_data_p,
-                ctypes.byref(camera.metadata),
-            )
-            if ret == 0:
-                break
-            time.sleep(0.002)
-        else:
-            raise CaptureFailure
-
-    print("      ...image captured...")
+    print(f"      ...image captured (flagState={camera.metadata.flagState})...")
 
     image = thermal_data.reshape(
         camera.thermal_height.value, camera.thermal_width.value
