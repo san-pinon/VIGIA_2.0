@@ -32,6 +32,8 @@ framerate   = 1     # Hz — frames per second requested
 frame_count = 1     # Number of frames captured per invocation
 t_max       = 900.0                # °C — sensor max temperature for saturation check
 saturation_pixel_threshold = 0.05  # Fraction of pixels at T_max to trigger warning
+colourmap_min_c = -10.0            # °C — fixed min for false-colour PNG
+colourmap_max_c = 60.0             # °C — fixed max for false-colour PNG
 
 # ---------------------------------------------------------------------------
 # Visible-spectrum camera                                  IMPLEMENTED (picam)

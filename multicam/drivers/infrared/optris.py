@@ -115,10 +115,14 @@ class Camera:
         )
 
 
-def _convert_temp2image(frame: np.ndarray) -> np.ndarray:
+def _convert_temp2image(
+    frame: np.ndarray,
+    temp_min_c: float = -10.0,
+    temp_max_c: float = 60.0,
+) -> np.ndarray:
     """
-    Utility function to convert from the outputs values from Optris camera to values
-    in the range 0-255.
+    Convert raw Optris uint16 thermal data to a false-colour RGB image using a
+    fixed temperature range.
 
     The Optris camera outputs values that can be related to temperature by:
 
@@ -128,26 +132,25 @@ def _convert_temp2image(frame: np.ndarray) -> np.ndarray:
     ----------
     frame:
         The image as output by the Optris camera.
+    temp_min_c:
+        Lower bound of the colour scale in °C.
+    temp_max_c:
+        Upper bound of the colour scale in °C.
 
     Returns
     -------
     image:
-        The converted image.
+        The false-colour RGB image.
 
     """
 
-    min_val, max_val, min_loc, max_loc = cv.minMaxLoc(frame)
-    min_val, max_val = [np.around((val - 1000) / 10, 1) for val in [min_val, max_val]]
+    raw_min = temp_min_c * 10 + 1000
+    raw_max = temp_max_c * 10 + 1000
 
-    frame_mean, frame_std = frame.mean(), frame.std()
-    image_min = int(max([frame.min(), frame_mean - 5 * frame_std]))
-    image_max = int(min([frame.max(), frame_mean + 5 * frame_std]))
+    clipped = np.clip(frame.astype(np.float64), raw_min, raw_max) - raw_min
+    scaled = (255 * clipped / (raw_max - raw_min)).astype(np.uint8)
 
-    clipped_image = np.clip(frame, image_min, image_max) - image_min
-
-    image = (255 * (clipped_image / (image_max - image_min))).astype(np.uint8)
-
-    image = cv.cvtColor(cv.applyColorMap(image, cv.COLORMAP_INFERNO), cv.COLOR_BGR2RGB)
+    image = cv.cvtColor(cv.applyColorMap(scaled, cv.COLORMAP_INFERNO), cv.COLOR_BGR2RGB)
 
     return image
 
