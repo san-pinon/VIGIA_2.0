@@ -230,12 +230,14 @@ def capture(camera: Camera) -> CaptureResult:
     )
     image_data_p = image_data.ctypes.data_as(ctypes.POINTER(ctypes.c_ubyte))
 
-    # Grab the first valid frame immediately. On libirimager 8.8.5 with the
-    # correct imager config XML, flagState is permanently 5 and real scene
-    # data is only available in the ~25 frames before the automatic NUC
-    # collapses the image (~0.85 s after init). Do not filter on flagState —
-    # just take the first frame the SDK accepts (ret == 0).
-    for _ in range(1000):
+    # Trigger a NUC (non-uniformity correction) flag cycle so the shutter
+    # opens fresh and delivers real scene data at flagState==0.
+    # Without this, the SDK stays at flagState==5 indefinitely.
+    LIBIR.evo_irimager_trigger_shutter_flag()
+
+    # Wait for flagState==0 (shutter open, scene data valid).
+    # Flag cycle takes ~9 s on libirimager 8.9.0 arm64; allow up to 15 s.
+    for _ in range(3000):
         ret = LIBIR.evo_irimager_get_thermal_palette_image_metadata(
             camera.thermal_width.value,
             camera.thermal_height.value,
@@ -245,13 +247,13 @@ def capture(camera: Camera) -> CaptureResult:
             image_data_p,
             ctypes.byref(camera.metadata),
         )
-        if ret == 0:
+        if ret == 0 and camera.metadata.flagState == 0:
             break
-        time.sleep(0.002)
+        time.sleep(0.005)
     else:
         raise CaptureFailure
 
-    print(f"      ...image captured (flagState={camera.metadata.flagState})...")
+    print(f"      ...image captured (flagState={camera.metadata.flagState}, chipT={camera.metadata.tempChip:.1f}C)...")
 
     image = thermal_data.reshape(
         camera.thermal_height.value, camera.thermal_width.value

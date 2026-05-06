@@ -27,8 +27,9 @@ data_archive = "/home/user/data"
 [infrared]
 model       = "optris"
 xml_path    = "/usr/share/libirimager/24062074_imager.xml"  # Imager config XML — NOT the cali data file.
-                                                              # Generate with: ir_generate_configuration <serial> > /usr/share/libirimager/<serial>_imager.xml
-                                                              # Then set tchipmode to 2 if chipT reads garbage (flagState=5 on libirimager 8.8.5).
+                                                              # Generate base with: ir_generate_configuration <serial> > /usr/share/libirimager/<serial>_imager.xml
+                                                              # Then apply Step 43 in test-snippets.md to set fov, temperature range, tchipmode=0,
+                                                              # and focus=0 (infinity — camera deployed 4 km from crater).
 log_path    = "/home/user/logs/thermal"
 framerate   = 1     # Hz — frames per second requested
 frame_count = 1     # Number of frames captured per invocation
