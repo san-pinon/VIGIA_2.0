@@ -224,13 +224,11 @@ def capture(camera: Camera) -> CaptureResult:
     )
     image_data_p = image_data.ctypes.data_as(ctypes.POINTER(ctypes.c_ubyte))
 
-    # On libirimager 8.8.5 the post-NUC frame is flat (the NUC collapses
-    # scene data rather than correcting it). Pre-NUC frames carry real scene
-    # content, so we skip frames while the flag/NUC is active (flagState != 0)
-    # and return the very first stable flagState==0 frame — i.e. the frame
-    # immediately after init, before the next NUC cycle is triggered.
-    # We do NOT call trigger_shutter_flag() so we don't kick off a NUC
-    # ourselves; we just grab whatever the camera is currently delivering.
+    # Grab the first valid frame immediately. On libirimager 8.8.5 with the
+    # correct imager config XML, flagState is permanently 5 and real scene
+    # data is only available in the ~25 frames before the automatic NUC
+    # collapses the image (~0.85 s after init). Do not filter on flagState —
+    # just take the first frame the SDK accepts (ret == 0).
     for _ in range(1000):
         ret = LIBIR.evo_irimager_get_thermal_palette_image_metadata(
             camera.thermal_width.value,
@@ -241,13 +239,9 @@ def capture(camera: Camera) -> CaptureResult:
             image_data_p,
             ctypes.byref(camera.metadata),
         )
-        if ret != 0:
-            time.sleep(0.002)
-            continue
-        # Skip frames during NUC/flag cycle
-        if camera.metadata.flagState != 0:
-            continue
-        break
+        if ret == 0:
+            break
+        time.sleep(0.002)
     else:
         raise CaptureFailure
 
