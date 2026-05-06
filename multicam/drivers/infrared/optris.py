@@ -160,12 +160,11 @@ class Camera:
 
 def _convert_temp2image(
     frame: np.ndarray,
-    temp_min_c: float = -10.0,
-    temp_max_c: float = 60.0,
+    temp_min_c: float | None = None,
+    temp_max_c: float | None = None,
 ) -> np.ndarray:
     """
-    Convert raw Optris uint16 thermal data to a false-colour RGB image using a
-    fixed temperature range.
+    Convert raw Optris uint16 thermal data to a false-colour RGB image.
 
     The Optris camera outputs values that can be related to temperature by:
 
@@ -176,9 +175,11 @@ def _convert_temp2image(
     frame:
         The image as output by the Optris camera.
     temp_min_c:
-        Lower bound of the colour scale in °C.
+        Lower bound of the colour scale in °C.  If ``None`` (default), the
+        2nd percentile of the scene is used (auto-scale).
     temp_max_c:
-        Upper bound of the colour scale in °C.
+        Upper bound of the colour scale in °C.  If ``None`` (default), the
+        98th percentile of the scene is used (auto-scale).
 
     Returns
     -------
@@ -187,13 +188,18 @@ def _convert_temp2image(
 
     """
 
-    raw_min = temp_min_c * 10 + 1000
-    raw_max = temp_max_c * 10 + 1000
+    temps = (frame.astype(np.float64) - 1000.0) / 10.0
 
-    clipped = np.clip(frame.astype(np.float64), raw_min, raw_max) - raw_min
-    scaled = (255 * clipped / (raw_max - raw_min)).astype(np.uint8)
+    lo = float(np.percentile(temps, 2)) if temp_min_c is None else temp_min_c
+    hi = float(np.percentile(temps, 98)) if temp_max_c is None else temp_max_c
 
-    image = cv.cvtColor(cv.applyColorMap(scaled, cv.COLORMAP_INFERNO), cv.COLOR_BGR2RGB)
+    if hi <= lo:
+        hi = lo + 1.0  # avoid division by zero on a perfectly flat frame
+
+    scaled = np.clip((temps - lo) / (hi - lo), 0.0, 1.0)
+    gray8 = (scaled * 255).astype(np.uint8)
+
+    image = cv.cvtColor(cv.applyColorMap(gray8, cv.COLORMAP_INFERNO), cv.COLOR_BGR2RGB)
 
     return image
 

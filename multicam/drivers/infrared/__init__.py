@@ -159,8 +159,8 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
             if instrument_config["model"] == "optris":
                 colour_image = _convert_temp2image(
                     raw_thermal,
-                    temp_min_c=float(instrument_config.get("colourmap_min_c", -10.0)),
-                    temp_max_c=float(instrument_config.get("colourmap_max_c", 60.0)),
+                    temp_min_c=float(instrument_config["colourmap_min_c"]) if "colourmap_min_c" in instrument_config else None,
+                    temp_max_c=float(instrument_config["colourmap_max_c"]) if "colourmap_max_c" in instrument_config else None,
                 )
                 colour_name = build_filename(
                     metadata_cfg, utcnow, suffix="colour", extension="png", frame=frames
