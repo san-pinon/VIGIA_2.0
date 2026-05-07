@@ -56,8 +56,13 @@ def image_capture_handler(args=None):
 
     config = read_config(pathlib.Path(args.config))
 
-    data_dir = pathlib.Path(config["metadata"]["data_archive"]) / args.instrument
-    (data_dir / "receive").mkdir(exist_ok=True, parents=True)
+    # Map CLI instrument names to output directory names where they differ.
+    # Instruments that manage their own output dirs (dslr, uv-sync) are skipped.
+    _SELF_MANAGED_DIRS = {"dslr", "uv-sync"}
+    if args.instrument not in _SELF_MANAGED_DIRS:
+        output_dir_name = {"visible": "picam"}.get(args.instrument, args.instrument)
+        data_dir = pathlib.Path(config["metadata"]["data_archive"]) / output_dir_name
+        (data_dir / "receive").mkdir(exist_ok=True, parents=True)
 
     # --- Map arguments to appropriate instrument driver ---
     FN_MAP[args.instrument](config, remaining)

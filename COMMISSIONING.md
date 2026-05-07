@@ -12,8 +12,8 @@ spectrometer FOV within the UV camera FOV.
 | Ultraviolet | `/home/user/data/ultraviolet/receive/` | stdout |
 | Spectrometer | `/home/user/data/spectrometer/receive/` | stdout |
 | Environmental | `/home/user/data/environmental/receive/` | stdout |
-| Infrared | `/home/user/data/infrared/receive/` | `/home/user/logs/thermal/` |
-| Visible | `/home/user/data/visible/receive/` | stdout |
+| Infrared | `/home/user/data/infrared/receive/` | stdout (SDK logs: `/home/user/logs/thermal/`) |
+| Visible (picam) | `/home/user/data/picam/receive/` | stdout |
 | UV sync | `/home/user/data/uv/` | stdout |
 | Orchestrator | — | `/home/user/logs/orchestrator.log` |
 
@@ -134,11 +134,12 @@ multicamctl capture infrared
 Check output:
 ```bash
 ls -lh /home/user/data/infrared/receive/
-cat /home/user/logs/thermal/<latest>.json
+cat /home/user/data/infrared/receive/*-metadata.json
 ```
 
-Expected: a 16-bit TIFF thermal image and a JSON metadata file with min/max/mean
-temperature values and a saturation flag.
+Expected: a 16-bit TIFF thermal image, a false-colour PNG, and a JSON metadata
+file (suffixed `-metadata.json`) with min/max/mean temperature values and a
+saturation flag. All three live in the same `receive/` directory.
 
 Copy to dev machine:
 ```bash
@@ -162,14 +163,14 @@ multicamctl capture visible
 
 Check output:
 ```bash
-ls -lh /home/user/data/visible/receive/
+ls -lh /home/user/data/picam/receive/
 ```
 
-Expected: JPEG or TIFF image files.
+Expected: PNG image files.
 
 Copy and inspect:
 ```bash
-scp user@192.168.30.150:/home/user/data/visible/receive/*.* /tmp/vis/
+scp user@192.168.30.150:/home/user/data/picam/receive/*.* /tmp/vis/
 ```
 
 **Focusing:**

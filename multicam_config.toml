@@ -50,6 +50,7 @@ model       = "v4l2"    # "v4l2" | "canon"
 framerate   = 5
 frame_count = 10
 camera_port = 0         # /dev/videoN index (picam and v4l2)
+# Output goes to {data_archive}/picam/receive/ (shared with DSLR metering frames)
 # width  = 4056         # optional: force capture resolution (v4l2 only)
 # height = 3040         # optional: force capture resolution (v4l2 only)
 

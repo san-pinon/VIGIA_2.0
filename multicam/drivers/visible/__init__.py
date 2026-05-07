@@ -102,7 +102,7 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
             _write_image(
                 utcnow,
                 image,
-                pathlib.Path(config["metadata"]["data_archive"]) / "visible",
+                pathlib.Path(config["metadata"]["data_archive"]) / "picam",
                 config,
             )
 
