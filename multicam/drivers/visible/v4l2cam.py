@@ -53,6 +53,11 @@ class Camera:
                 "Check that the device exists and is not in use."
             )
 
+        # Request MJPG so the camera sends decoded frames.
+        self._cap.set(
+            cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG")
+        )
+
         if "width" in config:
             self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(config["width"]))
         if "height" in config:
