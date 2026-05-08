@@ -86,9 +86,13 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
     output_dir = pathlib.Path(
         flags.output_dir
         or sync_config.get("output_dir")
-        or (config["metadata"]["data_archive"] + "/uv")
+        or (config["metadata"]["data_archive"] + "/ultraviolet")
+    )
+    spec_output_dir = pathlib.Path(
+        config["metadata"]["data_archive"] + "/spectrometer"
     )
     (output_dir / "receive").mkdir(parents=True, exist_ok=True)
+    (spec_output_dir / "receive").mkdir(parents=True, exist_ok=True)
 
     # --- Initialise devices ---
     print("Initialising UV cameras and spectrometer...")
@@ -232,7 +236,7 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
         )
         wavelengths = spec_result.metadata.get("wavelengths", [])
         intensities = spec_result.artifacts["spectrum"]
-        csv_path = output_dir / "receive" / spec_fname
+        csv_path = spec_output_dir / "receive" / spec_fname
         with open(csv_path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["wavelength_nm", "intensity"])
