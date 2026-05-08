@@ -10,7 +10,6 @@
 
 from .config import read_config
 from .core import rsync
-from .gps import get_gps_timestamp
 from .naming import build_filename
 
-__all__ = [read_config, rsync, get_gps_timestamp, build_filename]
+__all__ = [read_config, rsync, build_filename]

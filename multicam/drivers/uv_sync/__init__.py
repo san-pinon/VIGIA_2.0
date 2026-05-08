@@ -3,8 +3,7 @@ UV-sync: barrier-synchronized capture of both UV cameras and spectrometer.
 
 This subcommand triggers both UV cameras (310 nm and 330 nm filters) and the
 spectrometer simultaneously using a threading barrier. Supports saturation
-checking with automatic exposure adjustment, spectrum stacking, and GPS
-timestamping.
+checking with automatic exposure adjustment and spectrum stacking.
 
 :copyright:
     2026, Santiago Pinon.
@@ -34,7 +33,6 @@ from multicam.drivers.ultraviolet.picam import (
     check_image_saturation,
 )
 from multicam.errors import CaptureFailure
-from multicam.utilities.gps import get_gps_timestamp
 from multicam.utilities.naming import build_filename
 
 from .sync import synchronized_capture
@@ -59,7 +57,7 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
     Handle ``multicamctl capture uv-sync``.
 
     Barrier-synchronized capture of both UV cameras and spectrometer
-    with optional saturation-based exposure adjustment and GPS timestamping.
+    with optional saturation-based exposure adjustment.
 
     Parameters
     ----------
@@ -91,14 +89,6 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
         or (config["metadata"]["data_archive"] + "/uv")
     )
     (output_dir / "receive").mkdir(parents=True, exist_ok=True)
-
-    # --- GPS timestamp ---
-    gps_timestamp, is_gps = get_gps_timestamp(timeout_s=5.0)
-    timestamp = dt.now(UTC)
-    if is_gps:
-        print(f"GPS timestamp: {gps_timestamp.isoformat()}")
-    else:
-        print("WARNING: No GPS fix — using system UTC")
 
     # --- Initialise devices ---
     print("Initialising UV cameras and spectrometer...")
@@ -215,16 +205,16 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
                 break
 
         # --- Save outputs ---
-        ts_for_name = gps_timestamp if is_gps else timestamp
+        timestamp = dt.now(UTC)
         ch1 = uv1_result.metadata.get("filter_nm", 310)
         ch2 = uv2_result.metadata.get("filter_nm", 330)
 
         # UV images as uncompressed npz
         uv1_fname = build_filename(
-            metadata_cfg, ts_for_name, suffix=f"uv-{ch1}", extension="npz"
+            metadata_cfg, timestamp, suffix=f"uv-{ch1}", extension="npz"
         )
         uv2_fname = build_filename(
-            metadata_cfg, ts_for_name, suffix=f"uv-{ch2}", extension="npz"
+            metadata_cfg, timestamp, suffix=f"uv-{ch2}", extension="npz"
         )
         np.savez(
             output_dir / "receive" / uv1_fname,
@@ -238,7 +228,7 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
 
         # Spectrum as CSV (wavelength, intensity)
         spec_fname = build_filename(
-            metadata_cfg, ts_for_name, suffix="spectrum", extension="csv"
+            metadata_cfg, timestamp, suffix="spectrum", extension="csv"
         )
         wavelengths = spec_result.metadata.get("wavelengths", [])
         intensities = spec_result.artifacts["spectrum"]
@@ -252,11 +242,10 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
 
         # Metadata JSON
         meta_fname = build_filename(
-            metadata_cfg, ts_for_name, suffix="metadata", extension="json"
+            metadata_cfg, timestamp, suffix="metadata", extension="json"
         )
         meta_payload = {
-            "timestamp_utc": ts_for_name.isoformat(),
-            "timestamp_source": "gps" if is_gps else "system",
+            "timestamp_utc": timestamp.isoformat(),
             "uv_exposure_time_us": current_uv_exposure,
             "spectrometer_integration_time_us": current_spec_integration,
             "stack_count": stack_count,
@@ -279,7 +268,7 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
 
         summary = {
             "instrument": "uv-sync",
-            "timestamp_utc": ts_for_name.isoformat(),
+            "timestamp_utc": timestamp.isoformat(),
             "saturation_retries": saturation_retries,
             "files": {
                 "uv_a": uv1_fname,
