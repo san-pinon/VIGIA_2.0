@@ -168,7 +168,8 @@ def run_cycle(args, orch_config: dict) -> dict:
     Execute one full capture cycle.
 
     Group 1 (local): uv-sync + environmental — run in parallel, join.
-    Group 2 (SSH): infrared + dslr on multicam — run in parallel, join.
+    Group 2 (SSH): dslr on multicam (uses Arducam for metering).
+    Group 3 (SSH): infrared on multicam (after DSLR to avoid /dev/video conflict).
     """
 
     multicamctl = _find_multicamctl()
@@ -209,19 +210,11 @@ def run_cycle(args, orch_config: dict) -> dict:
     logger.info("Group 1 (local): starting %d task(s)", len(local_tasks))
     local_results = _run_group(local_tasks, args.dry_run)
 
-    # --- Group 2: Remote SSH commands (parallel) ---
-    remote_tasks: list[tuple[list[str], str]] = []
-
-    if not args.no_ir:
-        remote_tasks.append(
-            (
-                ssh_prefix + [remote_bin, "capture", "infrared", "--check-saturation"],
-                "infrared",
-            )
-        )
+    # --- Group 2: Remote DSLR (uses Arducam for metering) ---
+    dslr_tasks: list[tuple[list[str], str]] = []
 
     if not args.no_dslr:
-        remote_tasks.append(
+        dslr_tasks.append(
             (
                 ssh_prefix
                 + [
@@ -235,10 +228,24 @@ def run_cycle(args, orch_config: dict) -> dict:
             )
         )
 
-    logger.info("Group 2 (remote): starting %d task(s)", len(remote_tasks))
-    remote_results = _run_group(remote_tasks, args.dry_run)
+    logger.info("Group 2 (remote/dslr): starting %d task(s)", len(dslr_tasks))
+    dslr_results = _run_group(dslr_tasks, args.dry_run)
 
-    return {**local_results, **remote_results}
+    # --- Group 3: Remote IR (runs after DSLR to avoid /dev/video conflict) ---
+    ir_tasks: list[tuple[list[str], str]] = []
+
+    if not args.no_ir:
+        ir_tasks.append(
+            (
+                ssh_prefix + [remote_bin, "capture", "infrared", "--check-saturation"],
+                "infrared",
+            )
+        )
+
+    logger.info("Group 3 (remote/ir): starting %d task(s)", len(ir_tasks))
+    ir_results = _run_group(ir_tasks, args.dry_run)
+
+    return {**local_results, **dslr_results, **ir_results}
 
 
 # ---------------------------------------------------------------------------
