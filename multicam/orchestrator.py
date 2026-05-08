@@ -192,7 +192,7 @@ def run_cycle(args, orch_config: dict) -> dict:
                     "--max-retries",
                     "3",
                     "--stack",
-                    "10",
+                    "1",
                 ],
                 "uv-sync",
             )
@@ -230,7 +230,6 @@ def run_cycle(args, orch_config: dict) -> dict:
                     "dslr",
                     "--meter-with",
                     "picam",
-                    "--check-saturation",
                 ],
                 "dslr",
             )

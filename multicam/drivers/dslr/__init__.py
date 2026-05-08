@@ -32,7 +32,7 @@ from .metering import (
     EOS_ISO_VALUES,
     _clamp_shutter,
     _parse_shutter,
-    _shutter_to_str,
+    _quantize_shutter,
     meter_scene,
 )
 
@@ -157,7 +157,7 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
                     retries += 1
                     current = _parse_shutter(shutter_str)
                     new_shutter = _clamp_shutter(current * 3 / 4)
-                    shutter_str = _shutter_to_str(new_shutter)
+                    shutter_str = _quantize_shutter(new_shutter)
                     continue
             break
 

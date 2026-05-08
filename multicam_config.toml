@@ -62,7 +62,7 @@ Saturation = 0.0
 [visible.canon]
 # Settings applied via python-gphoto2 config widgets (canon only).
 iso          = 800
-shutterspeed = "1/250"  # gphoto2 shutterspeed string
+shutterspeed = "1/500"  # gphoto2 shutterspeed string
 aperture     = "5.6"    # gphoto2 aperture string
 
 # ---------------------------------------------------------------------------
