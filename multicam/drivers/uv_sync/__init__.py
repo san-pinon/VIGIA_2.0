@@ -130,6 +130,7 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
                         "stacking": stack_count,
                     },
                 )
+                capture_timestamp = dt.now(UTC)
             except CaptureFailure as e:
                 print(f"   Capture failed: {e}")
                 if attempt < max_retries:
@@ -209,7 +210,7 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
                 break
 
         # --- Save outputs ---
-        timestamp = dt.now(UTC)
+        timestamp = capture_timestamp
         ch1 = uv1_result.metadata.get("filter_nm", 310)
         ch2 = uv2_result.metadata.get("filter_nm", 330)
 

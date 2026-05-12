@@ -150,6 +150,7 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
                 raise
 
             canon_image = result.artifacts["image"]
+            timestamp = dt.now(UTC)
 
             if flags.check_saturation and _check_canon_saturation(canon_image):
                 print(f"   Canon image saturated (attempt {attempt + 1})")
@@ -163,8 +164,6 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
 
     finally:
         canon.shutdown()
-
-    timestamp = dt.now(UTC)
 
     # --- Save Canon image ---
     canon_fname = build_filename(

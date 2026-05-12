@@ -123,9 +123,9 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
     try:
         print("   ...entering capture loop...")
         while frames < instrument_config["frame_count"]:
-            utcnow = dt.now(UTC)
+            now_check = dt.now(UTC)
 
-            if utcnow < starttime + td(seconds=time_between_frames) and frames != 0:
+            if now_check < starttime + td(seconds=time_between_frames) and frames != 0:
                 continue
 
             try:
@@ -134,6 +134,7 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
                 camera.close()
                 raise
 
+            utcnow = dt.now(UTC)
             raw_thermal = capture_result.artifacts["image"]
             stats = _thermal_stats(raw_thermal)
 
