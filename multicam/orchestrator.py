@@ -4,10 +4,11 @@ VIGIA 2.0 capture orchestrator.
 Runs a continuous acquisition loop on uvcam (RPi5), triggering one full
 capture cycle every ``--interval`` seconds across all instruments:
 
-- **Local (Group 1, parallel):** UV-sync + environmental
-- **Remote via SSH (Group 2, parallel):** IR + DSLR on multicam (SBC)
+- **Local (parallel):** UV-sync + environmental on uvcam
+- **Remote (sequential):** IR → DSLR on multicam (SBC) via SSH
 
-Group 1 completes before Group 2 starts.
+Local and remote run concurrently.  IR fires first on the remote so its
+capture is closer in time to the UV cameras.
 
 :copyright:
     2026, Santiago Pinon.
@@ -163,13 +164,26 @@ def _run_group(tasks: list[tuple[list[str], str]], dry_run: bool) -> dict:
     return results
 
 
+def _run_remote_sequential(
+    tasks: list[tuple[list[str], str]],
+    dry_run: bool,
+    results: dict,
+) -> None:
+    """Run remote tasks sequentially (IR then DSLR) to avoid /dev/video conflict."""
+
+    for cmd, label in tasks:
+        _run_subprocess(cmd, label, results, dry_run)
+
+
 def run_cycle(args, orch_config: dict) -> dict:
     """
     Execute one full capture cycle.
 
-    Group 1 (local): uv-sync + environmental — run in parallel, join.
-    Group 2 (SSH): dslr on multicam (uses Arducam for metering).
-    Group 3 (SSH): infrared on multicam (after DSLR to avoid /dev/video conflict).
+    Local group (uv-sync + environmental, parallel internally) and remote
+    group (IR → DSLR, sequential internally) run **concurrently** since they
+    are on different hardware nodes.  IR runs first on the remote so its
+    capture is closer in time to the UV cameras on uvcam.  IR and DSLR
+    remain sequential to avoid the /dev/video2 conflict (Arducam vs Optris).
     """
 
     multicamctl = _find_multicamctl()
@@ -179,7 +193,7 @@ def run_cycle(args, orch_config: dict) -> dict:
 
     ssh_prefix = ["ssh", f"{user}@{host}"]
 
-    # --- Group 1: Local commands (parallel) ---
+    # --- Build local task list (run in parallel internally) ---
     local_tasks: list[tuple[list[str], str]] = []
 
     if not args.no_uv:
@@ -207,14 +221,20 @@ def run_cycle(args, orch_config: dict) -> dict:
             )
         )
 
-    logger.info("Group 1 (local): starting %d task(s)", len(local_tasks))
-    local_results = _run_group(local_tasks, args.dry_run)
+    # --- Build remote task list (sequential: IR first, then DSLR) ---
+    # IR runs first so it captures closer in time to the UV cameras on uvcam.
+    remote_tasks: list[tuple[list[str], str]] = []
 
-    # --- Group 2: Remote DSLR (uses Arducam for metering) ---
-    dslr_tasks: list[tuple[list[str], str]] = []
+    if not args.no_ir:
+        remote_tasks.append(
+            (
+                ssh_prefix + [remote_bin, "capture", "infrared", "--check-saturation"],
+                "infrared",
+            )
+        )
 
     if not args.no_dslr:
-        dslr_tasks.append(
+        remote_tasks.append(
             (
                 ssh_prefix
                 + [
@@ -228,24 +248,37 @@ def run_cycle(args, orch_config: dict) -> dict:
             )
         )
 
-    logger.info("Group 2 (remote/dslr): starting %d task(s)", len(dslr_tasks))
-    dslr_results = _run_group(dslr_tasks, args.dry_run)
+    # --- Run local and remote concurrently ---
+    local_results: dict = {}
+    remote_results: dict = {}
 
-    # --- Group 3: Remote IR (runs after DSLR to avoid /dev/video conflict) ---
-    ir_tasks: list[tuple[list[str], str]] = []
+    threads = []
 
-    if not args.no_ir:
-        ir_tasks.append(
-            (
-                ssh_prefix + [remote_bin, "capture", "infrared", "--check-saturation"],
-                "infrared",
-            )
+    if local_tasks:
+        logger.info("Local group: starting %d task(s)", len(local_tasks))
+        local_thread = threading.Thread(
+            target=lambda: local_results.update(
+                _run_group(local_tasks, args.dry_run)
+            ),
+            name="local-group",
         )
+        threads.append(local_thread)
 
-    logger.info("Group 3 (remote/ir): starting %d task(s)", len(ir_tasks))
-    ir_results = _run_group(ir_tasks, args.dry_run)
+    if remote_tasks:
+        logger.info("Remote group: starting %d task(s) (sequential)", len(remote_tasks))
+        remote_thread = threading.Thread(
+            target=_run_remote_sequential,
+            args=(remote_tasks, args.dry_run, remote_results),
+            name="remote-group",
+        )
+        threads.append(remote_thread)
 
-    return {**local_results, **dslr_results, **ir_results}
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    return {**local_results, **remote_results}
 
 
 # ---------------------------------------------------------------------------
