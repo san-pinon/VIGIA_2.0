@@ -206,8 +206,6 @@ def run_cycle(args, orch_config: dict) -> dict:
                     "--check-saturation",
                     "--max-retries",
                     "3",
-                    "--stack",
-                    "1",
                 ],
                 "uv-sync",
             )
