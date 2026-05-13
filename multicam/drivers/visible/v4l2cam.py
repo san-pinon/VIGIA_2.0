@@ -14,6 +14,7 @@ Does not require picamera2 or libcamera.
 
 from __future__ import annotations
 
+import subprocess
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -23,6 +24,32 @@ import numpy as np
 
 from multicam.drivers import CaptureResult
 from multicam.errors import CaptureFailure
+
+
+def _query_v4l2_card_name(device_index: int) -> str | None:
+    """Return the V4L2 'Card type' string for /dev/videoN, or None on failure."""
+    try:
+        out = subprocess.run(
+            ["v4l2-ctl", f"--device=/dev/video{device_index}", "--info"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        for line in out.stdout.splitlines():
+            if "Card type" in line:
+                return line.split(":", 1)[1].strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def _find_device_by_card_name(expected_name: str) -> int | None:
+    """Scan /dev/video0..15 and return the first index whose card name matches."""
+    for idx in range(16):
+        card = _query_v4l2_card_name(idx)
+        if card and expected_name.lower() in card.lower():
+            return idx
+    return None
 
 
 class Camera:
@@ -45,6 +72,26 @@ class Camera:
 
     def __init__(self, config: Mapping[str, Any]) -> None:
         device_index = int(config.get("camera_port", 0))
+        expected_name = config.get("expected_card_name")
+
+        # When expected_card_name is set, auto-discover the correct device
+        # index by scanning V4L2 nodes. This handles hot-plug scenarios where
+        # devices shift (e.g. Optris disconnected/reconnected between cycles).
+        if expected_name:
+            discovered = _find_device_by_card_name(expected_name)
+            if discovered is None:
+                raise RuntimeError(
+                    f"No V4L2 device matching '{expected_name}' found. "
+                    f"Is the camera connected? "
+                    f"Run 'v4l2-ctl --list-devices' to check."
+                )
+            if discovered != device_index:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Config says camera_port=%d but '%s' is at /dev/video%d — using %d.",
+                    device_index, expected_name, discovered, discovered,
+                )
+                device_index = discovered
 
         self._cap = cv2.VideoCapture(device_index, cv2.CAP_V4L2)
         if not self._cap.isOpened():
