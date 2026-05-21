@@ -90,6 +90,7 @@ class DualCamera:
                 self.camera_2.set_controls(dict(controls))
 
             self.camera_1.start()
+            self.camera_1.capture_array("raw")  # block until stream is live
             self.camera_2.start()
 
             start_delay = float(config.get("start_delay_s", 0.0))
