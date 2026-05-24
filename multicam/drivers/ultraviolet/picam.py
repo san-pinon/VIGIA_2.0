@@ -18,7 +18,6 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-import cv2
 import numpy as np
 
 from multicam.drivers import CaptureResult
@@ -81,8 +80,13 @@ class DualCamera:
             # TODO: re-enable camera_2 once replacement OV5647 is ready
             # self.camera_2 = PiCamera(config["camera_2_port"])
 
-            self.camera_1.configure(self.camera_1.create_still_configuration(raw={}))
-            # self.camera_2.configure(self.camera_2.create_still_configuration(raw={}))
+            still_cfg = {"format": "YUV420", "size": (2592, 1944)}
+            self.camera_1.configure(
+                self.camera_1.create_still_configuration(main=still_cfg)
+            )
+            # self.camera_2.configure(
+            #     self.camera_2.create_still_configuration(main=still_cfg)
+            # )
 
             controls = config.get("controls", {})
             if controls:
@@ -126,18 +130,6 @@ class DualCamera:
         )
 
 
-def _debayer_to_gray(raw: np.ndarray) -> np.ndarray:
-    """Debayer a raw Bayer array to single-channel grayscale.
-
-    The OV5647 raw stream from picamera2 uses an SBGGR10 Bayer pattern.
-    If the array is 3D (H, W, C) picamera2 has already unpacked it — take
-    the first plane which contains the full-resolution Bayer mosaic.
-    """
-    if raw.ndim == 3:
-        raw = raw[:, :, 0]
-    return cv2.cvtColor(raw, cv2.COLOR_BAYER_BG2GRAY)
-
-
 def capture(
     cameras: DualCamera, settings: dict | None = None
 ) -> tuple[CaptureResult, CaptureResult]:
@@ -168,27 +160,27 @@ def capture(
     """
 
     try:
-        raw_1 = cameras.camera_1.capture_array("raw")
+        yuv_1 = cameras.camera_1.capture_array("main")
+        image_1 = yuv_1[:1944, :2592]  # Y plane (grayscale luminance)
     except Exception as e:
         raise CaptureFailure(f"UV camera_1 capture failed: {e}") from e
 
     # TODO: re-enable camera_2 capture once replacement OV5647 is ready
     # try:
-    #     raw_2 = cameras.camera_2.capture_array("raw")
+    #     yuv_2 = cameras.camera_2.capture_array("main")
+    #     image_2 = yuv_2[:1944, :2592]
     # except Exception as e:
     #     raise CaptureFailure(f"UV camera_2 capture failed: {e}") from e
 
     ts = time.monotonic_ns()
-
-    image_1 = _debayer_to_gray(raw_1)
 
     result_1 = CaptureResult(
         metadata={
             "ts_monotonic_ns": ts,
             "port": cameras._config.get("camera_1_port"),
             "filter_nm": cameras._config.get("camera_1_filter_nm", 310),
-            "stream": "raw",
-            "bit_depth": 10,
+            "stream": "main",
+            "bit_depth": 8,
             "shape": tuple(image_1.shape),
             "dtype": str(image_1.dtype),
         },
@@ -202,7 +194,7 @@ def check_image_saturation(
     image: np.ndarray,
     min_saturation: float = 0.5,
     max_saturation: float = 0.8,
-    bit_depth: int = 10,
+    bit_depth: int = 8,
     pixel_count: int = 100,
     rows: tuple[int, int] | None = None,
 ) -> int:
