@@ -30,22 +30,19 @@ from .picam import DualCamera, capture
 
 def _write_images(
     timestamp: dt,
-    result_1: CaptureResult,
-    result_2: CaptureResult,
+    results: tuple[CaptureResult, ...],
     config: dict,
 ) -> None:
-    """Write a pair of UV images to the receive directory."""
+    """Write UV images to the receive directory."""
 
     instrument_config = config["ultraviolet"]
     metadata = config["metadata"]
     archive = pathlib.Path(metadata["data_archive"]) / "ultraviolet" / "receive"
 
-    ch1 = result_1.metadata.get(
-        "filter_nm", instrument_config.get("camera_1_filter_nm", 310)
-    )
-    ch2 = result_2.metadata.get(
-        "filter_nm", instrument_config.get("camera_2_filter_nm", 330)
-    )
+    default_filters = [
+        instrument_config.get("camera_1_filter_nm", 310),
+        instrument_config.get("camera_2_filter_nm", 330),
+    ]
 
     julday = timestamp.timetuple().tm_yday
     base = (
@@ -56,15 +53,15 @@ def _write_images(
     print("      ...writing UV images to file...")
     frame = 0
     while True:
-        name_1 = archive / f"{base}-{frame:04d}-{ch1}.tiff"
-        if not name_1.is_file():
+        name = archive / f"{base}-{frame:04d}-{default_filters[0]}.tiff"
+        if not name.is_file():
             break
         frame += 1
 
-    name_2 = archive / f"{base}-{frame:04d}-{ch2}.tiff"
-
-    cv2.imwrite(str(name_1), result_1.artifacts["image"])
-    cv2.imwrite(str(name_2), result_2.artifacts["image"])
+    for i, result in enumerate(results):
+        ch = result.metadata.get("filter_nm", default_filters[i])
+        name = archive / f"{base}-{frame:04d}-{ch}.tiff"
+        cv2.imwrite(str(name), result.artifacts["image"])
 
 
 def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
@@ -101,11 +98,11 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
                 continue
 
             try:
-                result_1, result_2 = capture(camera)
+                results = capture(camera)
             except CaptureFailure:
                 raise
 
-            _write_images(utcnow, result_1, result_2, config)
+            _write_images(utcnow, results, config)
 
             starttime += td(seconds=time_between_frames)
             frames += 1

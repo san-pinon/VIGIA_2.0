@@ -77,21 +77,19 @@ class DualCamera:
 
         try:
             self.camera_1 = PiCamera(config["camera_1_port"])
-            self.camera_2 = PiCamera(config["camera_2_port"])
+            # TODO: re-enable camera_2 once replacement OV5647 is ready
+            # self.camera_2 = PiCamera(config["camera_2_port"])
 
-            # Configure with a still configuration that includes the raw stream
-            # so capture_array("raw") returns linear 10-bit Bayer data.
             self.camera_1.configure(self.camera_1.create_still_configuration(raw={}))
-            self.camera_2.configure(self.camera_2.create_still_configuration(raw={}))
+            # self.camera_2.configure(self.camera_2.create_still_configuration(raw={}))
 
             controls = config.get("controls", {})
             if controls:
                 self.camera_1.set_controls(dict(controls))
-                self.camera_2.set_controls(dict(controls))
+                # self.camera_2.set_controls(dict(controls))
 
             self.camera_1.start()
-            self.camera_1.capture_array("raw")  # block until stream is live
-            self.camera_2.start()
+            # self.camera_2.start()
 
             start_delay = float(config.get("start_delay_s", 0.0))
             if start_delay > 0:
@@ -161,10 +159,11 @@ def capture(
     except Exception as e:
         raise CaptureFailure(f"UV camera_1 capture failed: {e}") from e
 
-    try:
-        image_2 = cameras.camera_2.capture_array("raw")
-    except Exception as e:
-        raise CaptureFailure(f"UV camera_2 capture failed: {e}") from e
+    # TODO: re-enable camera_2 capture once replacement OV5647 is ready
+    # try:
+    #     image_2 = cameras.camera_2.capture_array("raw")
+    # except Exception as e:
+    #     raise CaptureFailure(f"UV camera_2 capture failed: {e}") from e
 
     ts = time.monotonic_ns()
 
@@ -180,20 +179,8 @@ def capture(
         },
         artifacts={"image": image_1},
     )
-    result_2 = CaptureResult(
-        metadata={
-            "ts_monotonic_ns": ts,
-            "port": cameras._config.get("camera_2_port"),
-            "filter_nm": cameras._config.get("camera_2_filter_nm", 330),
-            "stream": "raw",
-            "bit_depth": 10,
-            "shape": tuple(image_2.shape),
-            "dtype": str(image_2.dtype),
-        },
-        artifacts={"image": image_2},
-    )
 
-    return result_1, result_2
+    return (result_1,)
 
 
 def check_image_saturation(
