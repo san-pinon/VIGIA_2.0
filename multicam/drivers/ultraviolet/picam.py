@@ -18,6 +18,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+import cv2
 import numpy as np
 
 from multicam.drivers import CaptureResult
@@ -125,6 +126,18 @@ class DualCamera:
         )
 
 
+def _debayer_to_gray(raw: np.ndarray) -> np.ndarray:
+    """Debayer a raw Bayer array to single-channel grayscale.
+
+    The OV5647 raw stream from picamera2 uses an SBGGR10 Bayer pattern.
+    If the array is 3D (H, W, C) picamera2 has already unpacked it — take
+    the first plane which contains the full-resolution Bayer mosaic.
+    """
+    if raw.ndim == 3:
+        raw = raw[:, :, 0]
+    return cv2.cvtColor(raw, cv2.COLOR_BAYER_BG2GRAY)
+
+
 def capture(
     cameras: DualCamera, settings: dict | None = None
 ) -> tuple[CaptureResult, CaptureResult]:
@@ -155,17 +168,19 @@ def capture(
     """
 
     try:
-        image_1 = cameras.camera_1.capture_array("raw")
+        raw_1 = cameras.camera_1.capture_array("raw")
     except Exception as e:
         raise CaptureFailure(f"UV camera_1 capture failed: {e}") from e
 
     # TODO: re-enable camera_2 capture once replacement OV5647 is ready
     # try:
-    #     image_2 = cameras.camera_2.capture_array("raw")
+    #     raw_2 = cameras.camera_2.capture_array("raw")
     # except Exception as e:
     #     raise CaptureFailure(f"UV camera_2 capture failed: {e}") from e
 
     ts = time.monotonic_ns()
+
+    image_1 = _debayer_to_gray(raw_1)
 
     result_1 = CaptureResult(
         metadata={
