@@ -49,7 +49,8 @@ def _set_uv_exposure(cameras: DualCamera, exposure_us: int) -> None:
 
     controls = {"ExposureTime": exposure_us}
     cameras.camera_1.set_controls(controls)
-    cameras.camera_2.set_controls(controls)
+    # TODO: re-enable once replacement OV5647 is ready
+    # cameras.camera_2.set_controls(controls)
 
 
 def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
@@ -121,7 +122,8 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
             )
 
             try:
-                uv1_result, uv2_result, spec_result = synchronized_capture(
+                # TODO: unpack uv2_result once replacement OV5647 is ready
+                uv1_result, spec_result = synchronized_capture(
                     cameras,
                     spectrometer,
                     stack_count=stack_count,
@@ -141,24 +143,24 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
             if not flags.check_saturation:
                 break
 
-            # --- UV saturation check (both cameras use same exposure) ---
+            # --- UV saturation check ---
             img1 = uv1_result.artifacts["image"]
-            img2 = uv2_result.artifacts["image"]
+            # TODO: re-enable camera_2 saturation check once replacement OV5647 is ready
+            # img2 = uv2_result.artifacts["image"]
 
             sat1 = check_image_saturation(
                 img1, min_saturation=0.2, max_saturation=0.8, bit_depth=uv_bit_depth
             )
-            sat2 = check_image_saturation(
-                img2, min_saturation=0.2, max_saturation=0.8, bit_depth=uv_bit_depth
-            )
+            # sat2 = check_image_saturation(
+            #     img2, min_saturation=0.2, max_saturation=0.8, bit_depth=uv_bit_depth
+            # )
 
-            # Use the worse case to keep both cameras at the same exposure
             uv_needs_adjust = False
-            if sat1 == -1 or sat2 == -1:  # either over-exposed
+            if sat1 == -1:
                 current_uv_exposure = max(1, int(current_uv_exposure * 0.75))
                 uv_needs_adjust = True
                 print(f"   UV over-exposed — reducing to {current_uv_exposure} µs")
-            elif sat1 == 1 and sat2 == 1:  # both under-exposed
+            elif sat1 == 1:
                 current_uv_exposure = int(current_uv_exposure * 1.25)
                 uv_needs_adjust = True
                 print(f"   UV under-exposed — increasing to {current_uv_exposure} µs")
@@ -212,24 +214,25 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
         # --- Save outputs ---
         timestamp = capture_timestamp
         ch1 = uv1_result.metadata.get("filter_nm", 310)
-        ch2 = uv2_result.metadata.get("filter_nm", 330)
 
         # UV images as uncompressed npz
         uv1_fname = build_filename(
             metadata_cfg, timestamp, suffix=f"uv-{ch1}", extension="npz"
         )
-        uv2_fname = build_filename(
-            metadata_cfg, timestamp, suffix=f"uv-{ch2}", extension="npz"
-        )
         np.savez(
             output_dir / "receive" / uv1_fname,
             image=uv1_result.artifacts["image"],
         )
-        np.savez(
-            output_dir / "receive" / uv2_fname,
-            image=uv2_result.artifacts["image"],
-        )
-        print(f"   Saved UV images: {uv1_fname}, {uv2_fname}")
+        print(f"   Saved UV image: {uv1_fname}")
+        # TODO: re-enable once replacement OV5647 is ready
+        # ch2 = uv2_result.metadata.get("filter_nm", 330)
+        # uv2_fname = build_filename(
+        #     metadata_cfg, timestamp, suffix=f"uv-{ch2}", extension="npz"
+        # )
+        # np.savez(
+        #     output_dir / "receive" / uv2_fname,
+        #     image=uv2_result.artifacts["image"],
+        # )
 
         # Spectrum as CSV (wavelength, intensity)
         spec_fname = build_filename(
@@ -256,12 +259,10 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
             "stack_count": stack_count,
             "saturation_retries": saturation_retries,
             "uv_camera_a_filter_nm": ch1,
-            "uv_camera_b_filter_nm": ch2,
             "spectrum_mean_intensity": round(float(np.mean(intensities)), 2),
             "spectrum_max_intensity": round(float(np.max(intensities)), 2),
             "files": {
                 "uv_a": uv1_fname,
-                "uv_b": uv2_fname,
                 "spectrum": spec_fname,
             },
         }
@@ -277,7 +278,6 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
             "saturation_retries": saturation_retries,
             "files": {
                 "uv_a": uv1_fname,
-                "uv_b": uv2_fname,
                 "spectrum": spec_fname,
                 "metadata": meta_fname,
             },
