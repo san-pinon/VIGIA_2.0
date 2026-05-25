@@ -106,7 +106,7 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
             uv_config.get("controls", {}).get("ExposureTime", 50000)
         )
         current_spec_integration = spectrometer.integration_time_micros
-        uv_bit_depth = 8  # OV5647 returns 8-bit via picamera2 by default
+        uv_bit_depth = 10  # OV5647 raw Bayer is 10-bit
 
         uv1_result = None
         uv2_result = None
