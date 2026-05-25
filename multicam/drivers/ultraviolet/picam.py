@@ -34,17 +34,40 @@ else:
 
 def _capture_raw_uint16(camera: "PiCamera") -> np.ndarray:
     """
-    Capture a raw frame and return it as a uint16 array.
+    Capture a raw frame and return it as a uint16 array with 10-bit values.
 
-    picamera2 may return the raw stream as uint8 (truncated from 10-bit)
-    or uint16 depending on the version and format. This function ensures
-    the output is always uint16.
+    With SGBRG10_CSI2P format, picamera2 ``capture_array("raw")`` returns
+    packed data where every 5 bytes encode 4 10-bit pixels. This function
+    unpacks to a proper uint16 array (values 0–1023).
     """
 
     raw = camera.capture_array("raw")
     if raw.dtype == np.uint16:
         return raw
-    return raw.astype(np.uint16)
+
+    # Unpack CSI2P 10-bit: every 5 bytes → 4 pixels
+    # Bytes 0–3: top 8 bits of pixels 0–3
+    # Byte 4: 2 LSBs of each pixel (packed as p3|p2|p1|p0)
+    height = raw.shape[0]
+    stride = raw.shape[1]
+    sensor_width = 2592
+    packed_row = (sensor_width * 5) // 4  # 3240 bytes
+
+    rows = raw[:, :packed_row].reshape(height, sensor_width // 4, 5)
+    out = np.empty((height, sensor_width), dtype=np.uint16)
+    out[:, 0::4] = (rows[:, :, 0].astype(np.uint16) << 2) | (
+        (rows[:, :, 4] >> 0) & 0x03
+    )
+    out[:, 1::4] = (rows[:, :, 1].astype(np.uint16) << 2) | (
+        (rows[:, :, 4] >> 2) & 0x03
+    )
+    out[:, 2::4] = (rows[:, :, 2].astype(np.uint16) << 2) | (
+        (rows[:, :, 4] >> 4) & 0x03
+    )
+    out[:, 3::4] = (rows[:, :, 3].astype(np.uint16) << 2) | (
+        (rows[:, :, 4] >> 6) & 0x03
+    )
+    return out
 
 
 class DualCamera:
@@ -95,12 +118,16 @@ class DualCamera:
             # TODO: re-enable camera_2 once replacement OV5647 is ready
             # self.camera_2 = PiCamera(config["camera_2_port"])
 
+            # Request uncompressed 10-bit Bayer — the RPi5 PiSP defaults
+            # to GBRG_PISP_COMP1 (lossy compressed, uint8) which destroys
+            # the 10-bit dynamic range needed for SO₂ retrieval.
+            raw_fmt = {"format": "SGBRG10_CSI2P", "size": (2592, 1944)}
             self.camera_1.configure(
-                self.camera_1.create_still_configuration(raw={})
+                self.camera_1.create_still_configuration(raw=raw_fmt)
             )
             # TODO: re-enable camera_2 once replacement OV5647 is ready
             # self.camera_2.configure(
-            #     self.camera_2.create_still_configuration(raw={})
+            #     self.camera_2.create_still_configuration(raw=raw_fmt)
             # )
 
             controls = config.get("controls", {})
