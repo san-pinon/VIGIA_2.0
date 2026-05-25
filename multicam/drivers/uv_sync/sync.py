@@ -19,7 +19,7 @@ import threading
 from typing import Any
 
 from multicam.drivers import CaptureResult
-from multicam.drivers.ultraviolet.picam import _capture_raw_uint16
+from multicam.drivers.ultraviolet.picam import _capture_raw
 from multicam.errors import CaptureFailure
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ def synchronized_capture(
     def _capture_uv1():
         try:
             barrier.wait()
-            image = _capture_raw_uint16(cameras.camera_1)
+            image = _capture_raw(cameras.camera_1)
             ts = time.monotonic_ns()
             results["uv1"] = CaptureResult(
                 metadata={

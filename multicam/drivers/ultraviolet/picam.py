@@ -32,42 +32,9 @@ else:
     _PICAMERA2_IMPORT_ERROR = None
 
 
-def _capture_raw_uint16(camera: "PiCamera") -> np.ndarray:
-    """
-    Capture a raw frame and return it as a uint16 array with 10-bit values.
-
-    With SGBRG10_CSI2P format, picamera2 ``capture_array("raw")`` returns
-    packed data where every 5 bytes encode 4 10-bit pixels. This function
-    unpacks to a proper uint16 array (values 0–1023).
-    """
-
-    raw = camera.capture_array("raw")
-    if raw.dtype == np.uint16:
-        return raw
-
-    # Unpack CSI2P 10-bit: every 5 bytes → 4 pixels
-    # Bytes 0–3: top 8 bits of pixels 0–3
-    # Byte 4: 2 LSBs of each pixel (packed as p3|p2|p1|p0)
-    height = raw.shape[0]
-    stride = raw.shape[1]
-    sensor_width = 2592
-    packed_row = (sensor_width * 5) // 4  # 3240 bytes
-
-    rows = raw[:, :packed_row].reshape(height, sensor_width // 4, 5)
-    out = np.empty((height, sensor_width), dtype=np.uint16)
-    out[:, 0::4] = (rows[:, :, 0].astype(np.uint16) << 2) | (
-        (rows[:, :, 4] >> 0) & 0x03
-    )
-    out[:, 1::4] = (rows[:, :, 1].astype(np.uint16) << 2) | (
-        (rows[:, :, 4] >> 2) & 0x03
-    )
-    out[:, 2::4] = (rows[:, :, 2].astype(np.uint16) << 2) | (
-        (rows[:, :, 4] >> 4) & 0x03
-    )
-    out[:, 3::4] = (rows[:, :, 3].astype(np.uint16) << 2) | (
-        (rows[:, :, 4] >> 6) & 0x03
-    )
-    return out
+def _capture_raw(camera: "PiCamera") -> np.ndarray:
+    """Capture a raw frame from the camera."""
+    return camera.capture_array("raw")
 
 
 class DualCamera:
@@ -118,16 +85,12 @@ class DualCamera:
             # TODO: re-enable camera_2 once replacement OV5647 is ready
             # self.camera_2 = PiCamera(config["camera_2_port"])
 
-            # Request uncompressed 10-bit Bayer — the RPi5 PiSP defaults
-            # to GBRG_PISP_COMP1 (lossy compressed, uint8) which destroys
-            # the 10-bit dynamic range needed for SO₂ retrieval.
-            raw_fmt = {"format": "SGBRG10_CSI2P", "size": (2592, 1944)}
             self.camera_1.configure(
-                self.camera_1.create_still_configuration(raw=raw_fmt)
+                self.camera_1.create_still_configuration(raw={})
             )
             # TODO: re-enable camera_2 once replacement OV5647 is ready
             # self.camera_2.configure(
-            #     self.camera_2.create_still_configuration(raw=raw_fmt)
+            #     self.camera_2.create_still_configuration(raw={})
             # )
 
             controls = config.get("controls", {})
@@ -202,7 +165,7 @@ def capture(
     """
 
     try:
-        image_1 = _capture_raw_uint16(cameras.camera_1)
+        image_1 = _capture_raw(cameras.camera_1)
     except Exception as e:
         raise CaptureFailure(f"UV camera_1 capture failed: {e}") from e
 
@@ -220,7 +183,7 @@ def capture(
             "port": cameras._config.get("camera_1_port"),
             "filter_nm": cameras._config.get("camera_1_filter_nm", 310),
             "stream": "raw",
-            "bit_depth": 10,
+            "bit_depth": 8,
             "shape": tuple(image_1.shape),
             "dtype": str(image_1.dtype),
         },
