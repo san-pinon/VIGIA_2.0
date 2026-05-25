@@ -34,39 +34,17 @@ else:
 
 def _capture_raw_uint16(camera: "PiCamera") -> np.ndarray:
     """
-    Capture a raw frame and return it as a uint16 array with 10-bit values.
+    Capture a raw frame and return it as a uint16 array.
 
-    picamera2's ``capture_array("raw")`` returns packed CSI2P data as uint8.
-    This function unpacks the 10-bit Bayer data into a proper uint16 array
-    with values in the range 0–1023.
+    picamera2 may return the raw stream as uint8 (truncated from 10-bit)
+    or uint16 depending on the version and format. This function ensures
+    the output is always uint16.
     """
 
     raw = camera.capture_array("raw")
-    if raw.dtype != np.uint8:
-        return raw  # already unpacked (newer picamera2 versions)
-
-    # CSI2P 10-bit packing: every 5 bytes encode 4 pixels.
-    # Bytes 0–3 hold the top 8 bits; byte 4 holds the 2 LSBs of each.
-    height = raw.shape[0]
-    # Width in pixels = 4/5 of the byte width
-    packed_width = raw.shape[1]
-    width = (packed_width * 4) // 5
-
-    raw_flat = raw[:, :packed_width].reshape(height, width // 4, 5)
-    out = np.empty((height, width), dtype=np.uint16)
-    out[:, 0::4] = (raw_flat[:, :, 0].astype(np.uint16) << 2) | (
-        (raw_flat[:, :, 4] >> 0) & 0x03
-    )
-    out[:, 1::4] = (raw_flat[:, :, 1].astype(np.uint16) << 2) | (
-        (raw_flat[:, :, 4] >> 2) & 0x03
-    )
-    out[:, 2::4] = (raw_flat[:, :, 2].astype(np.uint16) << 2) | (
-        (raw_flat[:, :, 4] >> 4) & 0x03
-    )
-    out[:, 3::4] = (raw_flat[:, :, 3].astype(np.uint16) << 2) | (
-        (raw_flat[:, :, 4] >> 6) & 0x03
-    )
-    return out
+    if raw.dtype == np.uint16:
+        return raw
+    return raw.astype(np.uint16)
 
 
 class DualCamera:
