@@ -69,7 +69,7 @@ def synchronized_capture(
     def _capture_uv1():
         try:
             barrier.wait()
-            image = cameras.camera_1.capture_array()
+            image = cameras.camera_1.capture_array("raw")
             ts = time.monotonic_ns()
             results["uv1"] = CaptureResult(
                 metadata={
