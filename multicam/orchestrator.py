@@ -238,9 +238,7 @@ def run_cycle(args, orch_config: dict) -> dict:
                 + [
                     remote_bin,
                     "capture",
-                    "dslr",
-                    "--meter-with",
-                    "picam",
+                    "dslr"
                 ],
                 "dslr",
             )

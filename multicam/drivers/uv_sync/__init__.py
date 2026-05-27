@@ -70,7 +70,7 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
     """
 
     flag_parser = argparse.ArgumentParser(add_help=False)
-    flag_parser.add_argument("--check-saturation", action="store_true", default=False)
+    flag_parser.add_argument("--check-saturation", action="store_true", default=True)
     flag_parser.add_argument("--max-retries", type=int, default=3)
     flag_parser.add_argument("--stack", type=int, default=10)
     flag_parser.add_argument("--output-dir", type=str, default=None)

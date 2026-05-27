@@ -19,7 +19,6 @@ import threading
 from typing import Any
 
 from multicam.drivers import CaptureResult
-from multicam.drivers.ultraviolet.picam import _capture_raw
 from multicam.errors import CaptureFailure
 
 logger = logging.getLogger(__name__)
@@ -50,8 +49,8 @@ def synchronized_capture(
 
     Returns
     -------
-    uv1_result, uv2_result, spec_result:
-        Capture results for camera 1, camera 2, and the spectrometer.
+    uv1_result, spec_result:
+        Capture results for camera 1 and the spectrometer.
 
     """
 
@@ -70,13 +69,16 @@ def synchronized_capture(
     def _capture_uv1():
         try:
             barrier.wait()
-            image = _capture_raw(cameras.camera_1)
+            yuv = cameras.camera_1.capture_array("main")
+            image = yuv[:1944, :2592]  # Y plane (grayscale luminance)
             ts = time.monotonic_ns()
             results["uv1"] = CaptureResult(
                 metadata={
                     "ts_monotonic_ns": ts,
                     "port": cameras._config.get("camera_1_port"),
                     "filter_nm": cameras._config.get("camera_1_filter_nm", 310),
+                    "stream": "main",
+                    "bit_depth": 8,
                     "shape": tuple(image.shape),
                     "dtype": str(image.dtype),
                 },
@@ -88,13 +90,16 @@ def synchronized_capture(
     # def _capture_uv2():
     #     try:
     #         barrier.wait()
-    #         image = cameras.camera_2.capture_array()
+    #         yuv = cameras.camera_2.capture_array("main")
+    #         image = yuv[:1944, :2592]
     #         ts = time.monotonic_ns()
     #         results["uv2"] = CaptureResult(
     #             metadata={
     #                 "ts_monotonic_ns": ts,
     #                 "port": cameras._config.get("camera_2_port"),
     #                 "filter_nm": cameras._config.get("camera_2_filter_nm", 330),
+    #                 "stream": "main",
+    #                 "bit_depth": 8,
     #                 "shape": tuple(image.shape),
     #                 "dtype": str(image.dtype),
     #             },

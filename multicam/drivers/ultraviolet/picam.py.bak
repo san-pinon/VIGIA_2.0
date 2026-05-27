@@ -32,6 +32,11 @@ else:
     _PICAMERA2_IMPORT_ERROR = None
 
 
+def _capture_raw(camera: "PiCamera") -> np.ndarray:
+    """Capture a raw frame from the camera."""
+    return camera.capture_array("main")
+
+
 class DualCamera:
     """
     Long-lived controller for the UV dual-camera system.
@@ -80,12 +85,12 @@ class DualCamera:
             # TODO: re-enable camera_2 once replacement OV5647 is ready
             # self.camera_2 = PiCamera(config["camera_2_port"])
 
-            still_cfg = {"format": "YUV420", "size": (2592, 1944)}
             self.camera_1.configure(
-                self.camera_1.create_still_configuration(main=still_cfg)
+                self.camera_1.create_still_configuration(main={})
             )
+            # TODO: re-enable camera_2 once replacement OV5647 is ready
             # self.camera_2.configure(
-            #     self.camera_2.create_still_configuration(main=still_cfg)
+            #     self.camera_2.create_still_configuration(raw={})
             # )
 
             controls = config.get("controls", {})
@@ -160,15 +165,13 @@ def capture(
     """
 
     try:
-        yuv_1 = cameras.camera_1.capture_array("main")
-        image_1 = yuv_1[:1944, :2592]  # Y plane (grayscale luminance)
+        image_1 = _capture_raw(cameras.camera_1)
     except Exception as e:
         raise CaptureFailure(f"UV camera_1 capture failed: {e}") from e
 
     # TODO: re-enable camera_2 capture once replacement OV5647 is ready
     # try:
-    #     yuv_2 = cameras.camera_2.capture_array("main")
-    #     image_2 = yuv_2[:1944, :2592]
+    #     image_2 = _capture_raw_uint16(cameras.camera_2)
     # except Exception as e:
     #     raise CaptureFailure(f"UV camera_2 capture failed: {e}") from e
 
@@ -179,7 +182,7 @@ def capture(
             "ts_monotonic_ns": ts,
             "port": cameras._config.get("camera_1_port"),
             "filter_nm": cameras._config.get("camera_1_filter_nm", 310),
-            "stream": "main",
+            "stream": "raw",
             "bit_depth": 8,
             "shape": tuple(image_1.shape),
             "dtype": str(image_1.dtype),
@@ -194,7 +197,7 @@ def check_image_saturation(
     image: np.ndarray,
     min_saturation: float = 0.5,
     max_saturation: float = 0.8,
-    bit_depth: int = 8,
+    bit_depth: int = 10,
     pixel_count: int = 100,
     rows: tuple[int, int] | None = None,
 ) -> int:

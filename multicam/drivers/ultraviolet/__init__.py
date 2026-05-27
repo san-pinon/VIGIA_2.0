@@ -20,10 +20,11 @@ from datetime import UTC
 from datetime import datetime as dt
 from datetime import timedelta as td
 
-import cv2
+import numpy as np
 
 from multicam.drivers import CaptureResult
 from multicam.errors import CaptureFailure
+from multicam.utilities.naming import build_filename
 
 from .picam import DualCamera, capture
 
@@ -31,37 +32,23 @@ from .picam import DualCamera, capture
 def _write_images(
     timestamp: dt,
     results: tuple[CaptureResult, ...],
+    output_dir: pathlib.Path,
     config: dict,
 ) -> None:
-    """Write UV images to the receive directory."""
+    """Save UV captures as NPZ files into output_dir."""
 
-    instrument_config = config["ultraviolet"]
     metadata = config["metadata"]
-    archive = pathlib.Path(metadata["data_archive"]) / "ultraviolet" / "receive"
-
     default_filters = [
-        instrument_config.get("camera_1_filter_nm", 310),
-        instrument_config.get("camera_2_filter_nm", 330),
+        config["ultraviolet"].get("camera_1_filter_nm", 310),
+        config["ultraviolet"].get("camera_2_filter_nm", 330),
     ]
 
-    julday = timestamp.timetuple().tm_yday
-    base = (
-        f"{metadata['vnum']}.{metadata['site_code']}.{timestamp.year}.{julday:03d}_"
-        f"{timestamp.hour:02d}{timestamp.minute:02d}{timestamp.second:02d}"
-    )
-
     print("      ...writing UV images to file...")
-    frame = 0
-    while True:
-        name = archive / f"{base}-{frame:04d}-{default_filters[0]}.tiff"
-        if not name.is_file():
-            break
-        frame += 1
-
     for i, result in enumerate(results):
         ch = result.metadata.get("filter_nm", default_filters[i])
-        name = archive / f"{base}-{frame:04d}-{ch}.tiff"
-        cv2.imwrite(str(name), result.artifacts["image"])
+        fname = build_filename(metadata, timestamp, suffix=f"uv-{ch}", extension="npz")
+        np.savez(output_dir / fname, image=result.artifacts["image"])
+        print(f"      Saved: {fname}")
 
 
 def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
@@ -71,6 +58,9 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
     Captures ``frame_count`` image pairs at ``framerate`` Hz, writing each
     pair to the data archive as it is captured.
 
+    Output goes to the same directory as ``uv-sync`` (``uv_sync.output_dir``
+    or ``data_archive/uv``) so the dashboard picks up both capture paths.
+
     Parameters
     ----------
     config:
@@ -79,21 +69,24 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
     """
 
     instrument_config = config["ultraviolet"]
+    sync_config = config.get("uv_sync", {})
     time_between_frames = 1.0 / instrument_config["framerate"]
+
+    output_dir = pathlib.Path(
+        sync_config.get("output_dir")
+        or (config["metadata"]["data_archive"] + "/uv")
+    ) / "receive"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     print("Capturing UV images...")
 
     camera = DualCamera(instrument_config)
     try:
-        archive = pathlib.Path(config["metadata"]["data_archive"]) / "ultraviolet"
-        (archive / "receive").mkdir(parents=True, exist_ok=True)
-
         frames, starttime = 0, dt.now(UTC)
         print("   ...entering capture loop...")
         while frames < instrument_config["frame_count"]:
             utcnow = dt.now(UTC)
 
-            # Capture first frame immediately; afterwards wait for the interval.
             if utcnow < starttime + td(seconds=time_between_frames) and frames != 0:
                 continue
 
@@ -102,7 +95,7 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
             except CaptureFailure:
                 raise
 
-            _write_images(utcnow, results, config)
+            _write_images(utcnow, results, output_dir, config)
 
             starttime += td(seconds=time_between_frames)
             frames += 1
