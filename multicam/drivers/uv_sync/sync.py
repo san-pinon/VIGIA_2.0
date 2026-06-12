@@ -29,7 +29,7 @@ def synchronized_capture(
     spectrometer,
     stack_count: int = 10,
     spec_config: dict[str, Any] | None = None,
-) -> tuple[CaptureResult, CaptureResult]:
+) -> tuple[CaptureResult, CaptureResult, CaptureResult]:
     """
     Barrier-synchronized capture of both UV cameras and the spectrometer.
 
@@ -49,8 +49,8 @@ def synchronized_capture(
 
     Returns
     -------
-    uv1_result, spec_result:
-        Capture results for camera 1 and the spectrometer.
+    uv1_result, uv2_result, spec_result:
+        Capture results for camera 1, camera 2, and the spectrometer.
 
     """
 
@@ -60,9 +60,7 @@ def synchronized_capture(
         capture as capture_spectrum,
     )
 
-    # TODO: restore barrier to 3 and re-enable uv2 thread once replacement
-    #       OV5647 is ready
-    barrier = threading.Barrier(2, timeout=30)
+    barrier = threading.Barrier(3, timeout=30)
     results: dict[str, Any] = {}
     errors: dict[str, Exception] = {}
 
@@ -87,26 +85,26 @@ def synchronized_capture(
         except Exception as e:
             errors["uv1"] = e
 
-    # def _capture_uv2():
-    #     try:
-    #         barrier.wait()
-    #         yuv = cameras.camera_2.capture_array("main")
-    #         image = yuv[:1944, :2592]
-    #         ts = time.monotonic_ns()
-    #         results["uv2"] = CaptureResult(
-    #             metadata={
-    #                 "ts_monotonic_ns": ts,
-    #                 "port": cameras._config.get("camera_2_port"),
-    #                 "filter_nm": cameras._config.get("camera_2_filter_nm", 330),
-    #                 "stream": "main",
-    #                 "bit_depth": 8,
-    #                 "shape": tuple(image.shape),
-    #                 "dtype": str(image.dtype),
-    #             },
-    #             artifacts={"image": image},
-    #         )
-    #     except Exception as e:
-    #         errors["uv2"] = e
+    def _capture_uv2():
+        try:
+            barrier.wait()
+            yuv = cameras.camera_2.capture_array("main")
+            image = yuv[:1944, :2592]  # Y plane (grayscale luminance)
+            ts = time.monotonic_ns()
+            results["uv2"] = CaptureResult(
+                metadata={
+                    "ts_monotonic_ns": ts,
+                    "port": cameras._config.get("camera_2_port"),
+                    "filter_nm": cameras._config.get("camera_2_filter_nm", 330),
+                    "stream": "main",
+                    "bit_depth": 8,
+                    "shape": tuple(image.shape),
+                    "dtype": str(image.dtype),
+                },
+                artifacts={"image": image},
+            )
+        except Exception as e:
+            errors["uv2"] = e
 
     def _capture_spec():
         try:
@@ -120,7 +118,7 @@ def synchronized_capture(
 
     threads = [
         threading.Thread(target=_capture_uv1, name="uv1"),
-        # threading.Thread(target=_capture_uv2, name="uv2"),
+        threading.Thread(target=_capture_uv2, name="uv2"),
         threading.Thread(target=_capture_spec, name="spec"),
     ]
     for t in threads:
@@ -132,8 +130,8 @@ def synchronized_capture(
         msgs = [f"{k}: {v}" for k, v in errors.items()]
         raise CaptureFailure(f"Synchronized capture failed: {'; '.join(msgs)}")
 
-    for key in ("uv1", "spec"):
+    for key in ("uv1", "uv2", "spec"):
         if key not in results:
             raise CaptureFailure(f"Synchronized capture: missing result for {key}")
 
-    return results["uv1"], results["spec"]
+    return results["uv1"], results["uv2"], results["spec"]
