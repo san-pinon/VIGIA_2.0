@@ -1,2 +1,0 @@
-/usr/share/libirimager/24062074_imager.xml
-1
