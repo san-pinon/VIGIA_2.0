@@ -158,9 +158,9 @@ max_retries   = 3        # Saturation retry limit
 [dslr]
 output_dir           = "/home/user/data/dslr/"
 picam_output_dir     = "/home/user/data/picam/"
-max_meter_iterations = 5
-target_p95           = 204    # 80% of 255
-tolerance_pct        = 10     # ±10% of target_p95
+max_meter_iterations = 8
+target_p95           = 128    # 50% of 255 — EV metering target brightness
+calibration_stops    = 0.0    # tune in field: negative if Canon overexposes, positive if underexposes
 
 # ---------------------------------------------------------------------------
 # Orchestrator — capture cycle coordinator                    IMPLEMENTED

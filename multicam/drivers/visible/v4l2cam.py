@@ -93,6 +93,7 @@ class Camera:
                 )
                 device_index = discovered
 
+        self._device_path = f"/dev/video{device_index}"
         self._cap = cv2.VideoCapture(device_index, cv2.CAP_V4L2)
         if not self._cap.isOpened():
             raise RuntimeError(
