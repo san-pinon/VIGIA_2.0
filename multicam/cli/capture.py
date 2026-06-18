@@ -15,6 +15,7 @@ import sys
 from multicam.drivers.dslr import capture_dslr
 from multicam.drivers.environmental import capture_environmental
 from multicam.drivers.infrared import capture_image as capture_ir_image
+from multicam.drivers.infrared import capture_video as capture_ir_video
 from multicam.drivers.spectrometer import capture_spectra
 from multicam.drivers.ultraviolet import capture_image as capture_uv_images
 from multicam.drivers.uv_sync import capture_uv_sync
@@ -25,6 +26,7 @@ FN_MAP = {
     "dslr": capture_dslr,
     "environmental": capture_environmental,
     "infrared": capture_ir_image,
+    "infrared-video": capture_ir_video,
     "spectrometer": capture_spectra,
     "ultraviolet": capture_uv_images,
     "uv-sync": capture_uv_sync,
@@ -60,7 +62,9 @@ def image_capture_handler(args=None):
     # Instruments that manage their own output dirs (dslr, uv-sync) are skipped.
     _SELF_MANAGED_DIRS = {"dslr", "uv-sync"}
     if args.instrument not in _SELF_MANAGED_DIRS:
-        output_dir_name = {"visible": "picam"}.get(args.instrument, args.instrument)
+        output_dir_name = {"visible": "picam", "infrared-video": "infrared"}.get(
+            args.instrument, args.instrument
+        )
         data_dir = pathlib.Path(config["metadata"]["data_archive"]) / output_dir_name
         (data_dir / "receive").mkdir(exist_ok=True, parents=True)
 

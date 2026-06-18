@@ -16,7 +16,7 @@
 
 [metadata]
 vnum         = 341090          # Volcano number (VNUM catalogue)
-site_code    = "TLA"          # Short site identifier
+site_code    = "TLA"           # Short site identifier
 data_archive = "/home/user/data"
 
 # ---------------------------------------------------------------------------
@@ -31,12 +31,19 @@ xml_path    = "/usr/share/libirimager/24062074_imager.xml"  # Imager config XML 
                                                               # Then apply Step 43 in test-snippets.md to set fov, temperature range, tchipmode=0,
                                                               # and focus=0 (infinity — camera deployed 4 km from crater).
 log_path    = "/home/user/logs/thermal"
-framerate   = 1     # Hz — frames per second requested
+framerate   = 24     # Hz — frames per second requested
 frame_count = 1     # Number of frames captured per invocation
 t_max       = 900.0                # °C — sensor max temperature for saturation check
 saturation_pixel_threshold = 0.05  # Fraction of pixels at T_max to trigger warning
 colourmap_min_c = -10.0            # °C — fixed min for false-colour PNG
 colourmap_max_c = 60.0             # °C — fixed max for false-colour PNG
+# --- `capture infrared-video` (continuous radiometric capture) ---
+video_frame_count = 120  # Frames recorded per video run
+video_rate_hz     = 2.0  # Target capture rate. The imager XML `framerate` MUST be >= this
+                         # (software throttles by wall clock; it can only slow down, not speed up).
+nuc_interval_s    = 0    # Seconds between NUC shutter calibrations during a run.
+                         # 0 = NUC once at start only. Each NUC freezes the scene ~0.5–9 s
+                         # (logged per run); tune from real field timings, e.g. 1800 for 30 min.
 
 # ---------------------------------------------------------------------------
 # Visible-spectrum camera                                  IMPLEMENTED (picam)
@@ -89,7 +96,7 @@ start_delay_s      = 0.5     # Warm-up delay after camera start() before first c
 # AnalogueGain = 1.0
 
 # ---------------------------------------------------------------------------
-# Spectrometer — OceanInsight OceanHR4                     WIP
+# Spectrometer — OceanInsight OceanHR4                     IMPLEMENTED
 # USB ID: 0999:1002  |  Device confirmed on RPi5 at /dev/bus/usb/003/002
 # Interface: USB via seabreeze (pyseabreeze backend)
 # Confirmed limits: integration_time_us in [3800, 10000000], bit_depth=16

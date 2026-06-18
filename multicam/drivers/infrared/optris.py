@@ -253,7 +253,118 @@ def capture(camera: Camera) -> CaptureResult:
     else:
         raise CaptureFailure
 
-    print(f"      ...image captured (flagState={camera.metadata.flagState}, chipT={camera.metadata.tempChip:.1f}C)...")
+    print(
+        f"      ...image captured (flagState={camera.metadata.flagState}, chipT={camera.metadata.tempChip:.1f}C)..."
+    )
+
+    image = thermal_data.reshape(
+        camera.thermal_height.value, camera.thermal_width.value
+    )
+
+    return CaptureResult(metadata=camera.metadata, artifacts={"image": image})
+
+
+def trigger_nuc(camera: Camera, timeout_s: float = 15.0) -> float:
+    """
+    Trigger a NUC (non-uniformity correction) shutter flag cycle and wait for
+    the shutter to reopen (``flagState==0``).
+
+    Used by the video driver to (re)calibrate at the start of, or periodically
+    during, a continuous recording. The scene is frozen while the shutter is
+    closed, so the caller decides how often to pay this cost.
+
+    Parameters
+    ----------
+    camera:
+        An instantiated camera object.
+    timeout_s:
+        Maximum time to wait for the flag cycle to complete.
+
+    Returns
+    -------
+    elapsed_s:
+        How long the NUC cycle took, in seconds, so the caller can log/tune it.
+
+    """
+
+    thermal_data = np.zeros(
+        [camera.thermal_width.value * camera.thermal_height.value], dtype=np.uint16
+    )
+    thermal_data_p = thermal_data.ctypes.data_as(ctypes.POINTER(ctypes.c_ushort))
+    image_data = np.zeros(
+        [camera.palette_width.value * camera.palette_height.value * 3], dtype=np.uint8
+    )
+    image_data_p = image_data.ctypes.data_as(ctypes.POINTER(ctypes.c_ubyte))
+
+    start = time.monotonic()
+    LIBIR.evo_irimager_trigger_shutter_flag()
+    while time.monotonic() - start < timeout_s:
+        ret = LIBIR.evo_irimager_get_thermal_palette_image_metadata(
+            camera.thermal_width.value,
+            camera.thermal_height.value,
+            thermal_data_p,
+            camera.palette_width.value,
+            camera.palette_height.value,
+            image_data_p,
+            ctypes.byref(camera.metadata),
+        )
+        if ret == 0 and camera.metadata.flagState == 0:
+            break
+        time.sleep(0.005)
+    else:
+        raise CaptureFailure
+
+    return time.monotonic() - start
+
+
+def capture_stream_frame(camera: Camera, retries: int = 200) -> CaptureResult:
+    """
+    Grab the freshest thermal frame for continuous (video) capture.
+
+    Unlike :func:`capture`, this does **not** trigger a shutter flag or wait for
+    ``flagState==0`` — that would freeze the scene on every frame. It simply
+    pulls the latest frame the SDK has, retrying only on a transient non-zero
+    return code. NUC scheduling is left to the driver loop.
+
+    Parameters
+    ----------
+    camera:
+        An instantiated camera object.
+    retries:
+        Maximum number of pulls to attempt while the SDK returns a non-zero
+        (frame-not-ready) code, at 5 ms spacing.
+
+    Returns
+    -------
+    capture_result:
+        Object containing metadata and the uint16 thermal frame.
+
+    """
+
+    thermal_data = np.zeros(
+        [camera.thermal_width.value * camera.thermal_height.value], dtype=np.uint16
+    )
+    thermal_data_p = thermal_data.ctypes.data_as(ctypes.POINTER(ctypes.c_ushort))
+    image_data = np.zeros(
+        [camera.palette_width.value * camera.palette_height.value * 3], dtype=np.uint8
+    )
+    image_data_p = image_data.ctypes.data_as(ctypes.POINTER(ctypes.c_ubyte))
+
+    for _ in range(retries):
+        ret = LIBIR.evo_irimager_get_thermal_palette_image_metadata(
+            camera.thermal_width.value,
+            camera.thermal_height.value,
+            thermal_data_p,
+            camera.palette_width.value,
+            camera.palette_height.value,
+            image_data_p,
+            ctypes.byref(camera.metadata),
+        )
+        if ret == 0:
+            break
+        time.sleep(0.005)
+    else:
+        raise CaptureFailure
 
     image = thermal_data.reshape(
         camera.thermal_height.value, camera.thermal_width.value

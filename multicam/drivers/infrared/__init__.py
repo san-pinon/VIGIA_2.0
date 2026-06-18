@@ -197,3 +197,8 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
     }
     print(json.dumps(summary))
     sys.exit(0)
+
+
+# Imported at the bottom so ``video`` can reuse the helpers defined above
+# (``_thermal_stats``, ``_check_thermal_saturation``) without a circular import.
+from .video import capture_video as capture_video  # noqa: E402
