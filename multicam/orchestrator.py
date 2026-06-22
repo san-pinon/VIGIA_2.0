@@ -223,7 +223,12 @@ def run_cycle(args, orch_config: dict) -> dict:
     # IR runs first so it captures closer in time to the UV cameras on uvcam.
     remote_tasks: list[tuple[list[str], str]] = []
 
-    if not args.no_ir:
+    # The continuous capture-ir-video.service normally owns the Optris 24/7 (the
+    # SDK is single-owner), so the per-cycle IR snapshot is disabled by default —
+    # each monitor window's baseline frame is the IR snapshot. Enable
+    # orchestrator.ir_snapshot only when running without the monitor service.
+    ir_snapshot = orch_config.get("ir_snapshot", False)
+    if ir_snapshot and not args.no_ir:
         remote_tasks.append(
             (
                 ssh_prefix + [remote_bin, "capture", "infrared", "--check-saturation"],
@@ -255,9 +260,7 @@ def run_cycle(args, orch_config: dict) -> dict:
     if local_tasks:
         logger.info("Local group: starting %d task(s)", len(local_tasks))
         local_thread = threading.Thread(
-            target=lambda: local_results.update(
-                _run_group(local_tasks, args.dry_run)
-            ),
+            target=lambda: local_results.update(_run_group(local_tasks, args.dry_run)),
             name="local-group",
         )
         threads.append(local_thread)

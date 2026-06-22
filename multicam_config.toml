@@ -41,13 +41,32 @@ colourmap_max_c = 60.0             # °C — fixed max for false-colour PNG
 video_frame_count = 120  # Frames recorded per video run
 video_rate_hz     = 2.0  # Target capture rate. The imager XML `framerate` MUST be >= this
                          # (software throttles by wall clock; it can only slow down, not speed up).
-nuc_interval_s    = 0    # Seconds between NUC shutter calibrations during a run.
+nuc_interval_s    = 0    # Seconds between NUC shutter calibrations during a BURST run.
                          # 0 = NUC once at start only. Field-measured (2026-06-22, SBC):
                          # the initial NUC after USB init costs ~11.5 s, but every periodic
                          # mid-run NUC is only ~1 s — so mid-run NUCs are essentially free and
                          # you can afford a short interval. Tune from real field timings,
                          # e.g. 1800 for 30 min. Each NUC freezes the scene for its duration
                          # and inserts a ~2 s gap in the frame stream (logged per run).
+                         # NOTE: monitor mode (--monitor) ignores this and uses the
+                         # temperature-triggered NUC keys below instead.
+# --- `capture infrared-video --monitor` (continuous 24/7 monitor) ---
+# Runs forever at video_rate_hz, emitting one file set per tumbling window:
+# a .npz of the kept frames, a baseline colour .png (dashboard quick-look), and
+# a metadata .json holding stats for EVERY frame (kept or not). Per window it
+# keeps the first valid frame plus only frames that clear the activity trigger,
+# so a quiet window collapses to a single frame.
+monitor_window_s   = 60     # Seconds per output window (tumbling, non-overlapping).
+monitor_bg_percentile = 20  # Percentile of the ROI used as the per-frame ambient/background.
+monitor_delta_c    = 8.0    # °C above ambient a pixel must exceed to count as "hot".
+monitor_min_pixels = 25     # Keep a frame if this many ROI pixels are over-ambient.
+monitor_abs_max_c  = 0.0    # Optional: also keep if frame ROI max temp >= this (0 = disabled).
+# monitor_roi      = [x0, y0, x1, y1]   # Optional crop (e.g. crater only); omit for full frame.
+# --- Temperature-triggered NUC (monitor mode) — minimises shutter actuations ---
+nuc_drift_c        = 0.5    # Re-NUC once the chip temp drifts this far (°C) since the last NUC.
+                            # Field test 2026-06-22: ~0.5 °C drift took ~176 s after power-on.
+nuc_min_interval_s = 120    # Hard floor between NUCs (protects the shutter from oscillating chip temp).
+nuc_max_interval_s = 0      # Optional safety ceiling: force a NUC after this many seconds (0 = disabled).
 
 # ---------------------------------------------------------------------------
 # Visible-spectrum camera                                  IMPLEMENTED (picam)
@@ -184,3 +203,8 @@ multicam_host   = "192.168.30.150"
 multicam_user   = "user"
 remote_venv_bin = "/home/user/.venv/bin/multicamctl"
 log_path        = "/home/user/logs/orchestrator.log"
+ir_snapshot     = false  # Whether the cycle fires a single `capture infrared` snapshot.
+                         # false: the continuous capture-ir-video.service owns the Optris
+                         # 24/7 (the Optris SDK is single-owner), and each monitor window's
+                         # baseline frame serves as the IR snapshot. Set true only if you run
+                         # the orchestrator WITHOUT the continuous monitor service.

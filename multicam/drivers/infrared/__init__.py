@@ -74,6 +74,105 @@ def _thermal_stats(thermal_frame: np.ndarray) -> dict:
     }
 
 
+def _scene_background(temp_roi: np.ndarray, percentile: float) -> float:
+    """
+    Robust per-frame ambient estimate: a low percentile of the ROI temperatures.
+
+    Using a percentile (not the min) shrugs off cold-pixel noise, and because it
+    is recomputed every frame it tracks day/night ambient drift automatically.
+    """
+
+    return float(np.percentile(temp_roi, percentile))
+
+
+def _monitor_frame_metrics(
+    thermal_frame: np.ndarray,
+    roi: tuple[int, int, int, int] | None,
+    bg_percentile: float,
+    delta_c: float,
+) -> dict:
+    """
+    Per-frame activity metrics for monitor-mode retention.
+
+    Computes a robust scene background within the ROI and counts pixels that sit
+    ``delta_c`` °C above it ("over-ambient"). Stateless and day/night-robust: the
+    background is re-derived from the frame itself, so a uniform warm/cool scene
+    yields ~0 hot pixels while a localised hotspot stands out.
+
+    Parameters
+    ----------
+    thermal_frame:
+        Raw uint16 thermal data from the Optris camera (``temp = (v-1000)/10``).
+    roi:
+        ``(x0, y0, x1, y1)`` sub-region to analyse, or ``None`` for the whole frame.
+    bg_percentile:
+        Percentile of the ROI used as the ambient/background estimate.
+    delta_c:
+        °C above background a pixel must exceed to count as "hot".
+
+    Returns
+    -------
+    metrics:
+        ``{ambient_c, hot_pixel_count, temperature_max_c}`` over the ROI.
+
+    """
+
+    temp_frame = (thermal_frame.astype(np.float64) - 1000.0) / 10.0
+    if roi is not None:
+        x0, y0, x1, y1 = roi
+        temp_roi = temp_frame[y0:y1, x0:x1]
+    else:
+        temp_roi = temp_frame
+
+    ambient = _scene_background(temp_roi, bg_percentile)
+    hot_pixel_count = int(np.count_nonzero(temp_roi > ambient + delta_c))
+    return {
+        "ambient_c": ambient,
+        "hot_pixel_count": hot_pixel_count,
+        "temperature_max_c": float(temp_roi.max()),
+    }
+
+
+def _should_nuc(
+    chip_temp: float,
+    chip_temp_at_last_nuc: float,
+    secs_since_nuc: float,
+    drift_c: float,
+    min_interval_s: float,
+    max_interval_s: float,
+) -> bool:
+    """
+    Decide whether to trigger a temperature-driven NUC.
+
+    Minimises shutter actuations (the camera's main wear item) by NUC-ing on chip
+    drift rather than a fixed cadence, while honouring a min-interval floor so a
+    noisy/oscillating chip temperature cannot hammer the shutter, and an optional
+    max-interval ceiling as a safety re-NUC.
+
+    Parameters
+    ----------
+    chip_temp:
+        Latest detector chip temperature (°C).
+    chip_temp_at_last_nuc:
+        Chip temperature recorded at the previous NUC (°C).
+    secs_since_nuc:
+        Seconds elapsed since the previous NUC.
+    drift_c:
+        Absolute chip-temp drift (°C) since the last NUC that triggers a new one.
+    min_interval_s:
+        Hard floor between NUCs, in seconds (protects the shutter).
+    max_interval_s:
+        Optional ceiling: force a NUC after this many seconds (0 = disabled).
+
+    """
+
+    if secs_since_nuc < min_interval_s:
+        return False
+    if max_interval_s > 0 and secs_since_nuc >= max_interval_s:
+        return True
+    return abs(chip_temp - chip_temp_at_last_nuc) >= drift_c
+
+
 def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
     """
     Handles queries to IR cameras attached to the multicam system.
@@ -160,8 +259,12 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
             if instrument_config["model"] == "optris":
                 colour_image = _convert_temp2image(
                     raw_thermal,
-                    temp_min_c=float(instrument_config["colourmap_min_c"]) if "colourmap_min_c" in instrument_config else None,
-                    temp_max_c=float(instrument_config["colourmap_max_c"]) if "colourmap_max_c" in instrument_config else None,
+                    temp_min_c=float(instrument_config["colourmap_min_c"])
+                    if "colourmap_min_c" in instrument_config
+                    else None,
+                    temp_max_c=float(instrument_config["colourmap_max_c"])
+                    if "colourmap_max_c" in instrument_config
+                    else None,
                 )
                 colour_name = build_filename(
                     metadata_cfg, utcnow, suffix="colour", extension="png", frame=frames
