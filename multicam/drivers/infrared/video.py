@@ -117,7 +117,13 @@ def capture_video(config: dict, extra_args: list[str] | None = None) -> None:
         print(
             f"   ...entering capture loop ({flags.frames} frames @ {flags.rate} Hz)..."
         )
-        last_accept = None
+        # Reference the throttle to when each capture *starts*, not when it
+        # returns. capture_stream_frame() blocks until the SDK has a fresh
+        # frame (up to ~1 hardware period); anchoring to the post-capture time
+        # would stack that wait on top of period_s and halve the effective
+        # rate. Anchoring to the start overlaps the two so the achieved rate is
+        # min(target, hardware).
+        last_capture_start = None
         last_nuc = time.monotonic()
         while len(frames) < flags.frames:
             # Periodic NUC, if requested. Freezes the scene briefly.
@@ -133,20 +139,26 @@ def capture_video(config: dict, extra_args: list[str] | None = None) -> None:
                     }
                 )
                 last_nuc = time.monotonic()
+                # Resync the cadence so the long NUC stall doesn't fire an
+                # immediate catch-up frame.
+                last_capture_start = time.monotonic()
                 print(f"      ...periodic NUC complete ({elapsed:.1f}s)...")
 
             # Wall-clock throttle to the target rate.
-            if last_accept is not None and time.monotonic() - last_accept < period_s:
+            if (
+                last_capture_start is not None
+                and time.monotonic() - last_capture_start < period_s
+            ):
                 time.sleep(0.002)
                 continue
 
+            last_capture_start = time.monotonic()
             try:
                 capture_result = capture_stream_frame(camera)
             except CaptureFailure:
                 camera.close()
                 raise
 
-            last_accept = time.monotonic()
             utcnow = dt.now(UTC)
             raw_thermal = capture_result.artifacts["image"]
             idx = len(frames)
