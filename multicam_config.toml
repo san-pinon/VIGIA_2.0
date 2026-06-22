@@ -42,8 +42,12 @@ video_frame_count = 120  # Frames recorded per video run
 video_rate_hz     = 2.0  # Target capture rate. The imager XML `framerate` MUST be >= this
                          # (software throttles by wall clock; it can only slow down, not speed up).
 nuc_interval_s    = 0    # Seconds between NUC shutter calibrations during a run.
-                         # 0 = NUC once at start only. Each NUC freezes the scene ~0.5–9 s
-                         # (logged per run); tune from real field timings, e.g. 1800 for 30 min.
+                         # 0 = NUC once at start only. Field-measured (2026-06-22, SBC):
+                         # the initial NUC after USB init costs ~11.5 s, but every periodic
+                         # mid-run NUC is only ~1 s — so mid-run NUCs are essentially free and
+                         # you can afford a short interval. Tune from real field timings,
+                         # e.g. 1800 for 30 min. Each NUC freezes the scene for its duration
+                         # and inserts a ~2 s gap in the frame stream (logged per run).
 
 # ---------------------------------------------------------------------------
 # Visible-spectrum camera                                  IMPLEMENTED (picam)

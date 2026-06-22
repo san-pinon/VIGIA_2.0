@@ -167,7 +167,15 @@ def capture_video(config: dict, extra_args: list[str] | None = None) -> None:
             temps = (raw_thermal.astype(np.float64) - 1000.0) / 10.0
             stats["temperature_median_c"] = round(float(np.median(temps)), 1)
 
-            entry = {"frame": idx, "timestamp_utc": utcnow.isoformat(), **stats}
+            entry = {
+                "frame": idx,
+                "timestamp_utc": utcnow.isoformat(),
+                # Detector chip temperature — drives NUC scheduling. Watch its
+                # drift across a run to tune nuc_interval_s (re-NUC ~every
+                # 0.5-1 C of chip drift).
+                "chip_temp_c": round(float(capture_result.metadata.tempChip), 2),
+                **stats,
+            }
             if flags.check_saturation:
                 entry["saturation_warning"] = _check_thermal_saturation(
                     raw_thermal, t_max, sat_threshold
