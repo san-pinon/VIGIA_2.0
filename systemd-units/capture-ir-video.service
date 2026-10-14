@@ -6,6 +6,9 @@ After=network.target
 User=user
 Type=simple
 WorkingDirectory=/home/user
+# Stream print() logs to journald live; without this Python block-buffers stdout
+# (not a TTY) and window/NUC lines only appear in bursts or on stop.
+Environment=PYTHONUNBUFFERED=1
 # Owns the Optris 24/7 (the irdirectsdk session is single-owner). Streams at
 # video_rate_hz and emits one window file set per minute; disable the
 # orchestrator's per-cycle IR snapshot (orchestrator.ir_snapshot = false) so the
