@@ -54,8 +54,6 @@ def synchronized_capture(
 
     """
 
-    import time
-
     from multicam.drivers.spectrometer.oceaninsight import (
         capture as capture_spectrum,
     )
@@ -64,47 +62,12 @@ def synchronized_capture(
     results: dict[str, Any] = {}
     errors: dict[str, Exception] = {}
 
-    def _capture_uv1():
+    def _capture_uv(n: int):
         try:
             barrier.wait()
-            yuv = cameras.camera_1.capture_array("main")
-            image = yuv[:1944, :2592]  # Y plane (grayscale luminance)
-            ts = time.monotonic_ns()
-            results["uv1"] = CaptureResult(
-                metadata={
-                    "ts_monotonic_ns": ts,
-                    "port": cameras._config.get("camera_1_port"),
-                    "filter_nm": cameras._config.get("camera_1_filter_nm", 310),
-                    "stream": "main",
-                    "bit_depth": 8,
-                    "shape": tuple(image.shape),
-                    "dtype": str(image.dtype),
-                },
-                artifacts={"image": image},
-            )
+            results[f"uv{n}"] = cameras.capture_one(n)
         except Exception as e:
-            errors["uv1"] = e
-
-    def _capture_uv2():
-        try:
-            barrier.wait()
-            yuv = cameras.camera_2.capture_array("main")
-            image = yuv[:1944, :2592]  # Y plane (grayscale luminance)
-            ts = time.monotonic_ns()
-            results["uv2"] = CaptureResult(
-                metadata={
-                    "ts_monotonic_ns": ts,
-                    "port": cameras._config.get("camera_2_port"),
-                    "filter_nm": cameras._config.get("camera_2_filter_nm", 330),
-                    "stream": "main",
-                    "bit_depth": 8,
-                    "shape": tuple(image.shape),
-                    "dtype": str(image.dtype),
-                },
-                artifacts={"image": image},
-            )
-        except Exception as e:
-            errors["uv2"] = e
+            errors[f"uv{n}"] = e
 
     def _capture_spec():
         try:
@@ -117,8 +80,8 @@ def synchronized_capture(
             errors["spec"] = e
 
     threads = [
-        threading.Thread(target=_capture_uv1, name="uv1"),
-        threading.Thread(target=_capture_uv2, name="uv2"),
+        threading.Thread(target=_capture_uv, args=(1,), name="uv1"),
+        threading.Thread(target=_capture_uv, args=(2,), name="uv2"),
         threading.Thread(target=_capture_spec, name="spec"),
     ]
     for t in threads:

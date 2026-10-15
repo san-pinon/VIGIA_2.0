@@ -32,12 +32,52 @@ else:
     _PICAMERA2_IMPORT_ERROR = None
 
 
+DEFAULT_EXPOSURE_MS = 50.0
+MIN_EXPOSURE_MS = 0.1
+DEFAULT_MAX_EXPOSURE_MS = 1000.0
+
+# Controls DualCamera sets itself; ignored in [ultraviolet.controls].
+_MANAGED_CONTROLS = {
+    "ExposureTime",
+    "AnalogueGain",
+    "AeEnable",
+    "ExposureTimeMode",
+    "AnalogueGainMode",
+}
+
+# Width/height of the Y plane in the YUV420 still stream.
+_IMAGE_SHAPE = (1944, 2592)
+
+
+def _ms_to_us(exposure_ms: float) -> int:
+    return max(1, int(round(exposure_ms * 1000)))
+
+
+def configured_exposure_ms(config: Mapping[str, Any], n: int) -> float:
+    """
+    Starting exposure (ms) for UV camera ``n`` (1 or 2) from the config.
+
+    Uses ``camera_<n>_exposure_ms``. Falls back to a legacy shared
+    ``[ultraviolet.controls] ExposureTime`` (µs) so old configs still load.
+    """
+
+    key = f"camera_{n}_exposure_ms"
+    if key in config:
+        return float(config[key])
+    legacy_us = config.get("controls", {}).get("ExposureTime")
+    if legacy_us is not None:
+        return float(legacy_us) / 1000.0
+    return DEFAULT_EXPOSURE_MS
+
+
 class DualCamera:
     """
     Long-lived controller for the UV dual-camera system.
 
-    Wraps two ``Picamera2`` instances sharing a common set of libcamera
-    control overrides (exposure time, gain, etc.).
+    Each camera gets its own exposure time (the 310 nm and 330 nm filters
+    pass very different amounts of light), while analogue gain is locked
+    to a fixed value (default 1.0) with auto-exposure/auto-gain disabled,
+    so pixel values scale only with exposure time.
 
     Expected config shape (``config["ultraviolet"]``):
 
@@ -45,18 +85,21 @@ class DualCamera:
 
         [ultraviolet]
         model          = "picam"
-        camera_1_port  = 0      # confirm port → filter mapping on the RPi5
+        camera_1_port  = 0      # port 0 → 310 nm (field-confirmed)
         camera_2_port  = 1
         framerate      = 0.5
         frame_count    = 1
         camera_1_filter_nm = 310   # optional, default 310
         camera_2_filter_nm = 330   # optional, default 330
+        camera_1_exposure_ms = 600.0
+        camera_2_exposure_ms = 65.0
+        max_exposure_ms      = 1000.0  # optional, auto-adjust ceiling
+        analogue_gain        = 1.0     # optional, default 1.0
         start_delay_s  = 0.5       # optional warm-up delay after start()
 
         [ultraviolet.controls]
-        # libcamera control overrides applied to both cameras.
-        ExposureTime = 50000   # µs
-        AnalogueGain = 1.0
+        # Extra libcamera control overrides applied to both cameras.
+        # Exposure/gain controls here are ignored (set above instead).
 
     """
 
@@ -75,6 +118,14 @@ class DualCamera:
         self.camera_1: PiCamera | None = None
         self.camera_2: PiCamera | None = None
 
+        self.analogue_gain = float(config.get("analogue_gain", 1.0))
+        self.max_exposure_ms = float(
+            config.get("max_exposure_ms", DEFAULT_MAX_EXPOSURE_MS)
+        )
+        self.exposure_ms = {
+            n: self.clamp_exposure_ms(configured_exposure_ms(config, n)) for n in (1, 2)
+        }
+
         try:
             self.camera_1 = PiCamera(config["camera_1_port"])
             self.camera_2 = PiCamera(config["camera_2_port"])
@@ -87,10 +138,21 @@ class DualCamera:
                 self.camera_2.create_still_configuration(main=still_cfg)
             )
 
-            controls = config.get("controls", {})
-            if controls:
-                self.camera_1.set_controls(dict(controls))
-                self.camera_2.set_controls(dict(controls))
+            # Exposure and gain are owned by this class; drop them from the
+            # free-form overrides so they can't fight the manual settings.
+            extra_controls = {
+                k: v
+                for k, v in config.get("controls", {}).items()
+                if k not in _MANAGED_CONTROLS
+            }
+            for n in (1, 2):
+                cam = self.camera(n)
+                cam.set_controls(
+                    {
+                        **extra_controls,
+                        **self._manual_controls(cam, self.exposure_ms[n]),
+                    }
+                )
 
             self.camera_1.start()
             self.camera_2.start()
@@ -101,6 +163,108 @@ class DualCamera:
         except Exception as e:
             self.close()
             raise RuntimeError(f"Failed to initialise UV camera pair: {e}") from e
+
+    def camera(self, n: int) -> PiCamera:
+        """Return the Picamera2 instance for camera ``n`` (1 or 2)."""
+
+        return self.camera_1 if n == 1 else self.camera_2
+
+    def clamp_exposure_ms(self, exposure_ms: float) -> float:
+        return max(MIN_EXPOSURE_MS, min(self.max_exposure_ms, float(exposure_ms)))
+
+    def _manual_controls(self, cam: PiCamera, exposure_ms: float) -> dict:
+        """Controls for a fixed exposure and fixed analogue gain (AE/AGC off)."""
+
+        controls = {
+            "ExposureTime": _ms_to_us(exposure_ms),
+            "AnalogueGain": self.analogue_gain,
+        }
+        available = cam.camera_controls
+        # Older libcamera (e.g. v0.1 on the RPi5) uses AeEnable; newer releases
+        # use per-control modes (1 = manual). Set whichever this build exposes.
+        if "AeEnable" in available:
+            controls["AeEnable"] = False
+        if "ExposureTimeMode" in available:
+            controls["ExposureTimeMode"] = 1
+        if "AnalogueGainMode" in available:
+            controls["AnalogueGainMode"] = 1
+        return controls
+
+    def set_exposure(self, n: int, exposure_ms: float) -> float:
+        """Set camera ``n`` to a new exposure (ms); returns the clamped value."""
+
+        exposure_ms = self.clamp_exposure_ms(exposure_ms)
+        cam = self.camera(n)
+        cam.set_controls(self._manual_controls(cam, exposure_ms))
+        self.exposure_ms[n] = exposure_ms
+        return exposure_ms
+
+    def settle_exposure(
+        self, n: int, max_frames: int = 6, tolerance: float = 0.05
+    ) -> dict:
+        """
+        Discard frames from camera ``n`` until its reported exposure and
+        analogue gain match the requested ones (new controls take a few frames
+        to apply).
+
+        Returns the metadata of the last frame read.
+        """
+
+        target_us = _ms_to_us(self.exposure_ms[n])
+        metadata = {}
+        for _ in range(max_frames):
+            metadata = self.camera(n).capture_metadata()
+            actual_us = metadata.get("ExposureTime", 0)
+            actual_gain = metadata.get("AnalogueGain", 0.0)
+            if (
+                abs(actual_us - target_us) <= tolerance * target_us
+                and abs(actual_gain - self.analogue_gain)
+                <= tolerance * self.analogue_gain
+            ):
+                return metadata
+        print(
+            f"   WARNING: UV camera_{n} did not settle: requested "
+            f"{target_us / 1000:.3f} ms / gain {self.analogue_gain}, sensor reports "
+            f"{metadata.get('ExposureTime', 0) / 1000:.3f} ms / "
+            f"gain {metadata.get('AnalogueGain', 0.0):.3f}"
+        )
+        return metadata
+
+    def capture_one(self, n: int) -> CaptureResult:
+        """Capture one frame from camera ``n`` with its per-frame sensor metadata."""
+
+        try:
+            request = self.camera(n).capture_request()
+            try:
+                yuv = request.make_array("main")
+                frame_md = request.get_metadata()
+            finally:
+                request.release()
+        except Exception as e:
+            raise CaptureFailure(f"UV camera_{n} capture failed: {e}") from e
+
+        ts = time.monotonic_ns()
+        image = yuv[: _IMAGE_SHAPE[0], : _IMAGE_SHAPE[1]]  # Y plane (grayscale)
+        return CaptureResult(
+            metadata={
+                "ts_monotonic_ns": ts,
+                "port": self._config.get(f"camera_{n}_port"),
+                "filter_nm": self._config.get(
+                    f"camera_{n}_filter_nm", 310 if n == 1 else 330
+                ),
+                "stream": "main",
+                "bit_depth": 8,
+                "shape": tuple(image.shape),
+                "dtype": str(image.dtype),
+                "exposure_ms_requested": round(self.exposure_ms[n], 3),
+                "exposure_ms_actual": round(frame_md.get("ExposureTime", 0) / 1000, 3),
+                "analogue_gain_requested": self.analogue_gain,
+                "analogue_gain_actual": round(frame_md.get("AnalogueGain", 0.0), 4),
+                "digital_gain_actual": round(frame_md.get("DigitalGain", 0.0), 4),
+                "sensor_timestamp_ns": frame_md.get("SensorTimestamp"),
+            },
+            artifacts={"image": image},
+        )
 
     def close(self) -> None:
         """Close both cameras (idempotent)."""
@@ -125,7 +289,8 @@ class DualCamera:
         return (
             f"DualCamera("
             f"port_1={self._config.get('camera_1_port')}, "
-            f"port_2={self._config.get('camera_2_port')})"
+            f"port_2={self._config.get('camera_2_port')}, "
+            f"exposure_ms={self.exposure_ms}, gain={self.analogue_gain})"
         )
 
 
@@ -136,8 +301,8 @@ def capture(
     Capture one frame from each UV camera.
 
     The two captures are not hardware-synchronised; they happen as quickly
-    as consecutive ``capture_array()`` calls allow. Timestamps share the
-    same monotonic reference so the inter-frame offset can be assessed.
+    as consecutive captures allow. Each result carries the sensor-reported
+    exposure, gain and timestamp of its frame.
 
     Parameters
     ----------
@@ -158,47 +323,17 @@ def capture(
 
     """
 
-    try:
-        yuv_1 = cameras.camera_1.capture_array("main")
-        image_1 = yuv_1[:1944, :2592]  # Y plane (grayscale luminance)
-    except Exception as e:
-        raise CaptureFailure(f"UV camera_1 capture failed: {e}") from e
+    return cameras.capture_one(1), cameras.capture_one(2)
 
-    try:
-        yuv_2 = cameras.camera_2.capture_array("main")
-        image_2 = yuv_2[:1944, :2592]  # Y plane (grayscale luminance)
-    except Exception as e:
-        raise CaptureFailure(f"UV camera_2 capture failed: {e}") from e
 
-    ts = time.monotonic_ns()
+def image_brightness(
+    image: np.ndarray, bit_depth: int = 8, pixel_count: int = 100
+) -> float:
+    """Mean of the ``pixel_count`` brightest pixels as a fraction of full scale."""
 
-    result_1 = CaptureResult(
-        metadata={
-            "ts_monotonic_ns": ts,
-            "port": cameras._config.get("camera_1_port"),
-            "filter_nm": cameras._config.get("camera_1_filter_nm", 310),
-            "stream": "main",
-            "bit_depth": 8,
-            "shape": tuple(image_1.shape),
-            "dtype": str(image_1.dtype),
-        },
-        artifacts={"image": image_1},
-    )
-
-    result_2 = CaptureResult(
-        metadata={
-            "ts_monotonic_ns": ts,
-            "port": cameras._config.get("camera_2_port"),
-            "filter_nm": cameras._config.get("camera_2_filter_nm", 330),
-            "stream": "main",
-            "bit_depth": 8,
-            "shape": tuple(image_2.shape),
-            "dtype": str(image_2.dtype),
-        },
-        artifacts={"image": image_2},
-    )
-
-    return (result_1, result_2)
+    flat = image.ravel()
+    brightest = np.partition(flat, -pixel_count)[-pixel_count:]
+    return float(np.mean(brightest)) / (2**bit_depth - 1)
 
 
 def check_image_saturation(

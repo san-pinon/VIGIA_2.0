@@ -30,7 +30,8 @@ from multicam.drivers.spectrometer.oceaninsight import (
 )
 from multicam.drivers.ultraviolet.picam import (
     DualCamera,
-    check_image_saturation,
+    configured_exposure_ms,
+    image_brightness,
 )
 from multicam.errors import CaptureFailure
 from multicam.utilities.naming import build_filename
@@ -44,12 +45,24 @@ SPEC_INT_MIN = 3_800
 SPEC_INT_MAX = 10_000_000
 
 
-def _set_uv_exposure(cameras: DualCamera, exposure_us: int) -> None:
-    """Apply the same ExposureTime to both UV cameras."""
+# Brightness band (fraction of full scale, brightest pixels) a UV image must
+# fall in, and the level the auto-adjust aims for when it doesn't.
+UV_MIN_BRIGHTNESS = 0.2
+UV_MAX_BRIGHTNESS = 0.8
+UV_TARGET_BRIGHTNESS = 0.6
+UV_CLIPPED_BRIGHTNESS = 0.99
 
-    controls = {"ExposureTime": exposure_us}
-    cameras.camera_1.set_controls(controls)
-    cameras.camera_2.set_controls(controls)
+
+def _next_uv_exposure(exposure_ms: float, brightness: float) -> float | None:
+    """Exposure (ms) that brings ``brightness`` into band, or None if in band."""
+
+    if UV_MIN_BRIGHTNESS <= brightness <= UV_MAX_BRIGHTNESS:
+        return None
+    if brightness >= UV_CLIPPED_BRIGHTNESS:
+        # Clipped: the true brightness is unknown, so halve instead of scaling.
+        return exposure_ms * 0.5
+    factor = UV_TARGET_BRIGHTNESS / max(brightness, 0.01)
+    return exposure_ms * min(4.0, max(0.25, factor))
 
 
 def _read_uv_state(state_path: pathlib.Path) -> dict:
@@ -63,14 +76,23 @@ def _read_uv_state(state_path: pathlib.Path) -> dict:
 
 def _write_uv_state(
     state_path: pathlib.Path,
-    uv_exposure_us: int,
+    uv_exposure_ms: dict[int, float],
+    config_exposure_ms: dict[int, float],
     spec_integration_us: int,
     timestamp_iso: str,
 ) -> None:
-    """Persist the converged exposure settings for the next capture run."""
+    """
+    Persist the converged exposure settings for the next capture run.
+
+    The config exposures are stored too: a saved exposure is only reused
+    while the config value it started from is unchanged.
+    """
 
     payload = {
-        "uv_exposure_time_us": uv_exposure_us,
+        "uv1_exposure_ms": round(uv_exposure_ms[1], 3),
+        "uv2_exposure_ms": round(uv_exposure_ms[2], 3),
+        "uv1_config_exposure_ms": config_exposure_ms[1],
+        "uv2_config_exposure_ms": config_exposure_ms[2],
         "spec_integration_time_us": spec_integration_us,
         "updated_utc": timestamp_iso,
     }
@@ -101,7 +123,8 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
     flag_parser.add_argument("--max-retries", type=int, default=3)
     flag_parser.add_argument("--stack", type=int, default=10)
     flag_parser.add_argument("--output-dir", type=str, default=None)
-    flag_parser.add_argument("--initial-exposure", type=int, default=None)
+    flag_parser.add_argument("--uv1-exposure-ms", type=float, default=None)
+    flag_parser.add_argument("--uv2-exposure-ms", type=float, default=None)
     flag_parser.add_argument("--initial-spec-integration", type=int, default=None)
     flags = flag_parser.parse_args(extra_args or [])
 
@@ -118,9 +141,7 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
         or sync_config.get("output_dir")
         or (config["metadata"]["data_archive"] + "/ultraviolet")
     )
-    spec_output_dir = pathlib.Path(
-        config["metadata"]["data_archive"] + "/spectrometer"
-    )
+    spec_output_dir = pathlib.Path(config["metadata"]["data_archive"] + "/spectrometer")
     (output_dir / "receive").mkdir(parents=True, exist_ok=True)
     (spec_output_dir / "receive").mkdir(parents=True, exist_ok=True)
 
@@ -137,24 +158,36 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
     spectrometer = Spectrometer(spec_config)
 
     try:
-        # Resolve the starting UV exposure with precedence: explicit CLI
-        # override > last converged value persisted from a previous run >
-        # config default. Reusing the last value avoids re-running the
-        # saturation retries from a stale default on every cycle.
-        config_uv_exposure = int(
-            uv_config.get("controls", {}).get("ExposureTime", 50000)
-        )
-        if flags.initial_exposure is not None:
-            current_uv_exposure = flags.initial_exposure
-        elif saved_state.get("uv_exposure_time_us"):
-            current_uv_exposure = int(saved_state["uv_exposure_time_us"])
+        # Resolve each camera's starting exposure with precedence: explicit
+        # CLI override > last converged value from a previous run (only while
+        # the config value is unchanged) > config default. The two filters need
+        # very different exposures, so each camera is resolved on its own.
+        filters = {
+            n: uv_config.get(f"camera_{n}_filter_nm", 310 if n == 1 else 330)
+            for n in (1, 2)
+        }
+        config_exposure = {n: configured_exposure_ms(uv_config, n) for n in (1, 2)}
+        for n in (1, 2):
+            cli_ms = getattr(flags, f"uv{n}_exposure_ms")
+            saved_ms = saved_state.get(f"uv{n}_exposure_ms")
+            if cli_ms is not None:
+                start_ms, source = cli_ms, "CLI"
+            elif (
+                saved_ms
+                and saved_state.get(f"uv{n}_config_exposure_ms") == config_exposure[n]
+            ):
+                start_ms, source = saved_ms, "last run"
+            else:
+                start_ms, source = config_exposure[n], "config"
+            if start_ms != cameras.exposure_ms[n]:
+                cameras.set_exposure(n, start_ms)
+            # Make sure manual exposure/gain are in effect before the first frame.
+            cameras.settle_exposure(n)
             print(
-                f"   Starting from last UV exposure: {current_uv_exposure} µs "
-                f"(config default {config_uv_exposure} µs)"
+                f"   UV camera_{n} ({filters[n]} nm): starting at "
+                f"{cameras.exposure_ms[n]:.3f} ms ({source}), "
+                f"gain {cameras.analogue_gain}"
             )
-        else:
-            current_uv_exposure = config_uv_exposure
-        _set_uv_exposure(cameras, current_uv_exposure)
 
         # Same precedence for the spectrometer integration time.
         if flags.initial_spec_integration is not None:
@@ -178,7 +211,8 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
         for attempt in range(max_retries + 1):
             print(
                 f"   Capture attempt {attempt + 1} "
-                f"(UV exp={current_uv_exposure} µs, "
+                f"(UV {filters[1]} nm={cameras.exposure_ms[1]:.3f} ms, "
+                f"{filters[2]} nm={cameras.exposure_ms[2]:.3f} ms, "
                 f"spec int={current_spec_integration} µs, "
                 f"stack={stack_count})"
             )
@@ -204,32 +238,36 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
             if not flags.check_saturation:
                 break
 
-            # --- UV saturation check ---
-            img1 = uv1_result.artifacts["image"]
-            img2 = uv2_result.artifacts["image"]
-
-            sat1 = check_image_saturation(
-                img1, min_saturation=0.2, max_saturation=0.8, bit_depth=uv_bit_depth
-            )
-            sat2 = check_image_saturation(
-                img2, min_saturation=0.2, max_saturation=0.8, bit_depth=uv_bit_depth
-            )
-
-            # Both cameras share one exposure; prioritise avoiding clipping, so
-            # reduce if either camera is over-exposed, otherwise increase if
-            # either is under-exposed.
-            uv_needs_adjust = False
-            if sat1 == -1 or sat2 == -1:
-                current_uv_exposure = max(1, int(current_uv_exposure * 0.75))
-                uv_needs_adjust = True
-                print(f"   UV over-exposed — reducing to {current_uv_exposure} µs")
-            elif sat1 == 1 or sat2 == 1:
-                current_uv_exposure = int(current_uv_exposure * 1.25)
-                uv_needs_adjust = True
-                print(f"   UV under-exposed — increasing to {current_uv_exposure} µs")
-
-            if uv_needs_adjust:
-                _set_uv_exposure(cameras, current_uv_exposure)
+            # --- UV saturation check (each camera adjusted independently) ---
+            uv_changed = []
+            for n, result in ((1, uv1_result), (2, uv2_result)):
+                brightness = image_brightness(
+                    result.artifacts["image"], bit_depth=uv_bit_depth
+                )
+                # Scale from the exposure this frame was actually taken at.
+                frame_ms = (
+                    result.metadata["exposure_ms_actual"]
+                    or result.metadata["exposure_ms_requested"]
+                )
+                new_ms = _next_uv_exposure(frame_ms, brightness)
+                if new_ms is None:
+                    continue
+                old_ms = cameras.exposure_ms[n]
+                new_ms = cameras.set_exposure(n, new_ms)
+                if new_ms == old_ms:
+                    print(
+                        f"   WARNING: UV camera_{n} ({filters[n]} nm) at exposure "
+                        f"limit {old_ms:.3f} ms, brightness {brightness:.2f}"
+                    )
+                    continue
+                uv_changed.append(n)
+                print(
+                    f"   UV camera_{n} ({filters[n]} nm) brightness "
+                    f"{brightness:.2f} — exposure {old_ms:.3f} → {new_ms:.3f} ms"
+                )
+            for n in uv_changed:
+                cameras.settle_exposure(n)
+            uv_needs_adjust = bool(uv_changed)
 
             # --- Spectrum saturation check ---
             spectrum = spec_result.artifacts["spectrum"]
@@ -318,12 +356,16 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
         )
         meta_payload = {
             "timestamp_utc": timestamp.isoformat(),
-            "uv_exposure_time_us": current_uv_exposure,
+            "uv_a_exposure_ms": uv1_result.metadata["exposure_ms_requested"],
+            "uv_b_exposure_ms": uv2_result.metadata["exposure_ms_requested"],
+            "uv_analogue_gain": cameras.analogue_gain,
             "spectrometer_integration_time_us": current_spec_integration,
             "stack_count": stack_count,
             "saturation_retries": saturation_retries,
             "uv_camera_a_filter_nm": ch1,
             "uv_camera_b_filter_nm": ch2,
+            "uv_camera_a": uv1_result.metadata,
+            "uv_camera_b": uv2_result.metadata,
             "spectrum_mean_intensity": round(float(np.mean(intensities)), 2),
             "spectrum_max_intensity": round(float(np.max(intensities)), 2),
             "files": {
@@ -339,7 +381,8 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
         # Persist the converged exposure so the next run starts from here.
         _write_uv_state(
             state_path,
-            current_uv_exposure,
+            cameras.exposure_ms,
+            config_exposure,
             current_spec_integration,
             timestamp.isoformat(),
         )

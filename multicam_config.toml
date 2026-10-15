@@ -111,12 +111,22 @@ camera_2_port      = 1
 camera_1_filter_nm = 310     # Wavelength of the filter on camera_1 (nm)
 camera_2_filter_nm = 330     # Wavelength of the filter on camera_2 (nm)
 start_delay_s      = 0.5     # Warm-up delay after camera start() before first capture
+# Exposure per camera, in MILLISECONDS. The filters pass very different amounts
+# of light (sunlight at 310 nm is strongly attenuated by ozone; SO2 absorbs there
+# too), so each camera needs its own exposure to avoid saturating. Starting values
+# from the Nicaragua system with the same cameras: 310 nm ~600 ms, 330 nm ~65 ms.
+# uv-sync auto-adjusts each camera to keep its brightest pixels at 20–80 % of full
+# scale and remembers the last good values; editing a value here makes it start
+# from the new value again.
+camera_1_exposure_ms = 600.0   # 310 nm
+camera_2_exposure_ms = 65.0    # 330 nm
+max_exposure_ms      = 1000.0  # Ceiling for auto-adjust (both cameras)
+analogue_gain        = 1.0     # Locked for both cameras; auto-exposure/auto-gain are disabled
 
 [ultraviolet.controls]
-# libcamera control overrides applied to both UV cameras.
-# Tune ExposureTime (µs) on-site to achieve ~50–70 % well fill.
-ExposureTime = 500000   # field-tuned starting exposure (RPi live config, 2026-05); uv-sync prefers its saved state
-# AnalogueGain = 1.0
+# Extra libcamera control overrides applied to both UV cameras.
+# Exposure and gain are set above — ExposureTime/AnalogueGain/AeEnable here are ignored
+# (a legacy ExposureTime in µs is only used if camera_N_exposure_ms is missing).
 
 # ---------------------------------------------------------------------------
 # Spectrometer — OceanInsight OceanHR4                     IMPLEMENTED
