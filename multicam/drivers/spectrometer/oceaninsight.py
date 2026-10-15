@@ -25,6 +25,23 @@ from seabreeze.spectrometers import list_devices  # noqa: E402
 
 from multicam.drivers import CaptureResult  # noqa: E402
 
+DEFAULT_INTEGRATION_MS = 100.0
+
+
+def configured_integration_ms(config: Mapping[str, Any]) -> float:
+    """
+    Integration time (ms) from the ``[spectrometer]`` config.
+
+    Uses ``integration_time_ms``; falls back to a legacy ``integration_time_us``
+    so old configs still load.
+    """
+
+    if "integration_time_ms" in config:
+        return float(config["integration_time_ms"])
+    if "integration_time_us" in config:
+        return float(config["integration_time_us"]) / 1000.0
+    return DEFAULT_INTEGRATION_MS
+
 
 class Spectrometer:
     """
@@ -50,14 +67,13 @@ class Spectrometer:
         self.spectrometer = Spectrometer_(devices[0])
         self.spectrometer.trigger_mode(0)
 
-        self._integration_time = 100_000
+        self._integration_time = int(DEFAULT_INTEGRATION_MS * 1000)
         self._closed = False
 
         # Apply integration time from config immediately so the first capture
         # uses the correct value (avoids a silent mismatch if the default
-        # 100 000 µs differs from the configured value).
-        configured_time = int(config.get("integration_time_us", self._integration_time))
-        self.integration_time_micros = configured_time
+        # differs from the configured value).
+        self.integration_time_ms = configured_integration_ms(config)
 
     def shutdown(self) -> None:
         """Release spectrometer resources (idempotent)."""
@@ -96,6 +112,18 @@ class Spectrometer:
 
         self._integration_time = value
         self.spectrometer.integration_time_micros(value)
+
+    @property
+    def integration_time_ms(self) -> float:
+        """Return the currently set integration time in milliseconds."""
+
+        return self._integration_time / 1000.0
+
+    @integration_time_ms.setter
+    def integration_time_ms(self, value: float) -> None:
+        """Update the integration time (ms); the device itself works in µs."""
+
+        self.integration_time_micros = int(round(value * 1000))
 
     @property
     def bit_depth(self) -> int:
@@ -184,28 +212,28 @@ def capture(spectrometer: Spectrometer, settings: dict | None = None) -> Capture
     spectrometer:
         Initialised ``Spectrometer`` object.
     settings:
-        Per-call overrides: ``integration_time_us`` (int) and/or
+        Per-call overrides: ``integration_time_ms`` (float) and/or
         ``stacking`` (int, number of spectra to average).
 
     Returns
     -------
     capture_result:
-        Metadata contains ``ts_monotonic_ns``, ``integration_time_us``,
+        Metadata contains ``ts_monotonic_ns``, ``integration_time_ms``,
         ``stacking``, and ``wavelengths``.
         Artifacts contain ``spectrum`` (1-D ``np.ndarray``).
 
     """
 
     if settings:
-        integration_time = int(
-            settings.get("integration_time_us", spectrometer.integration_time_micros)
+        integration_ms = float(
+            settings.get("integration_time_ms", spectrometer.integration_time_ms)
         )
         n_stack = int(settings.get("stacking", 1))
     else:
-        integration_time = spectrometer.integration_time_micros
+        integration_ms = spectrometer.integration_time_ms
         n_stack = 1
 
-    spectrometer.integration_time_micros = integration_time
+    spectrometer.integration_time_ms = integration_ms
 
     # Capture and discard one spectrum as burn-in to flush the sensor.
     _ = spectrometer.spectrometer.intensities()
@@ -217,7 +245,7 @@ def capture(spectrometer: Spectrometer, settings: dict | None = None) -> Capture
 
     meta = {
         "ts_monotonic_ns": time.monotonic_ns(),
-        "integration_time_us": integration_time,
+        "integration_time_ms": spectrometer.integration_time_ms,
         "stacking": n_stack,
         "wavelengths": spectrometer.wavelengths.tolist(),
     }

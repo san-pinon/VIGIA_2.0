@@ -27,6 +27,7 @@ import numpy as np
 from multicam.drivers.spectrometer.oceaninsight import (
     Spectrometer,
     check_spectrum_saturation,
+    configured_integration_ms,
 )
 from multicam.drivers.ultraviolet.picam import (
     DualCamera,
@@ -40,9 +41,9 @@ from .sync import synchronized_capture
 
 logger = logging.getLogger(__name__)
 
-# Spectrometer integration time limits (µs) for OceanHR4
-SPEC_INT_MIN = 3_800
-SPEC_INT_MAX = 10_000_000
+# Spectrometer integration time limits (ms) for OceanHR4
+SPEC_INT_MIN_MS = 3.8
+SPEC_INT_MAX_MS = 10_000.0
 
 
 # Brightness band (fraction of full scale, brightest pixels) a UV image must
@@ -78,14 +79,15 @@ def _write_uv_state(
     state_path: pathlib.Path,
     uv_exposure_ms: dict[int, float],
     config_exposure_ms: dict[int, float],
-    spec_integration_us: int,
+    spec_integration_ms: float,
+    config_spec_integration_ms: float,
     timestamp_iso: str,
 ) -> None:
     """
     Persist the converged exposure settings for the next capture run.
 
-    The config exposures are stored too: a saved exposure is only reused
-    while the config value it started from is unchanged.
+    The config values are stored too: a saved exposure/integration time is
+    only reused while the config value it started from is unchanged.
     """
 
     payload = {
@@ -93,7 +95,8 @@ def _write_uv_state(
         "uv2_exposure_ms": round(uv_exposure_ms[2], 3),
         "uv1_config_exposure_ms": config_exposure_ms[1],
         "uv2_config_exposure_ms": config_exposure_ms[2],
-        "spec_integration_time_us": spec_integration_us,
+        "spec_integration_ms": round(spec_integration_ms, 3),
+        "spec_config_integration_ms": config_spec_integration_ms,
         "updated_utc": timestamp_iso,
     }
     try:
@@ -125,7 +128,7 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
     flag_parser.add_argument("--output-dir", type=str, default=None)
     flag_parser.add_argument("--uv1-exposure-ms", type=float, default=None)
     flag_parser.add_argument("--uv2-exposure-ms", type=float, default=None)
-    flag_parser.add_argument("--initial-spec-integration", type=int, default=None)
+    flag_parser.add_argument("--spec-integration-ms", type=float, default=None)
     flags = flag_parser.parse_args(extra_args or [])
 
     uv_config = config["ultraviolet"]
@@ -190,16 +193,20 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
             )
 
         # Same precedence for the spectrometer integration time.
-        if flags.initial_spec_integration is not None:
-            current_spec_integration = flags.initial_spec_integration
-        elif saved_state.get("spec_integration_time_us"):
-            current_spec_integration = int(saved_state["spec_integration_time_us"])
+        config_spec_ms = configured_integration_ms(spec_config)
+        saved_spec_ms = saved_state.get("spec_integration_ms")
+        if flags.spec_integration_ms is not None:
+            current_spec_ms, source = flags.spec_integration_ms, "CLI"
+        elif (
+            saved_spec_ms
+            and saved_state.get("spec_config_integration_ms") == config_spec_ms
+        ):
+            current_spec_ms, source = saved_spec_ms, "last run"
         else:
-            current_spec_integration = spectrometer.integration_time_micros
-        current_spec_integration = max(
-            SPEC_INT_MIN, min(SPEC_INT_MAX, current_spec_integration)
-        )
-        spectrometer.integration_time_micros = current_spec_integration
+            current_spec_ms, source = config_spec_ms, "config"
+        current_spec_ms = max(SPEC_INT_MIN_MS, min(SPEC_INT_MAX_MS, current_spec_ms))
+        spectrometer.integration_time_ms = current_spec_ms
+        print(f"   Spectrometer: starting at {current_spec_ms:.3f} ms ({source})")
 
         uv_bit_depth = 8  # RPi5 PiSP outputs 8-bit compressed raw
 
@@ -213,7 +220,7 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
                 f"   Capture attempt {attempt + 1} "
                 f"(UV {filters[1]} nm={cameras.exposure_ms[1]:.3f} ms, "
                 f"{filters[2]} nm={cameras.exposure_ms[2]:.3f} ms, "
-                f"spec int={current_spec_integration} µs, "
+                f"spec int={current_spec_ms:.3f} ms, "
                 f"stack={stack_count})"
             )
 
@@ -223,7 +230,7 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
                     spectrometer,
                     stack_count=stack_count,
                     spec_config={
-                        "integration_time_us": current_spec_integration,
+                        "integration_time_ms": current_spec_ms,
                         "stacking": stack_count,
                     },
                 )
@@ -277,29 +284,35 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
 
             spec_needs_adjust = False
             if spec_sat == -1:
-                new_int = max(SPEC_INT_MIN, int(current_spec_integration * 0.75))
-                if new_int == SPEC_INT_MIN and current_spec_integration == SPEC_INT_MIN:
+                new_ms = max(SPEC_INT_MIN_MS, current_spec_ms * 0.75)
+                if new_ms == current_spec_ms:
                     print(
                         "   WARNING: Spectrum saturated at minimum integration — "
                         "saving anyway"
                     )
                 else:
-                    current_spec_integration = new_int
-                    spectrometer.integration_time_micros = current_spec_integration
+                    current_spec_ms = new_ms
+                    spectrometer.integration_time_ms = current_spec_ms
                     spec_needs_adjust = True
                     print(
                         f"   Spectrum over-exposed — reducing to "
-                        f"{current_spec_integration} µs"
+                        f"{current_spec_ms:.3f} ms"
                     )
             elif spec_sat == 1:
-                new_int = min(SPEC_INT_MAX, int(current_spec_integration * 1.25))
-                current_spec_integration = new_int
-                spectrometer.integration_time_micros = current_spec_integration
-                spec_needs_adjust = True
-                print(
-                    f"   Spectrum under-exposed — increasing to "
-                    f"{current_spec_integration} µs"
-                )
+                new_ms = min(SPEC_INT_MAX_MS, current_spec_ms * 1.25)
+                if new_ms == current_spec_ms:
+                    print(
+                        "   WARNING: Spectrum under-exposed at maximum integration — "
+                        "saving anyway"
+                    )
+                else:
+                    current_spec_ms = new_ms
+                    spectrometer.integration_time_ms = current_spec_ms
+                    spec_needs_adjust = True
+                    print(
+                        f"   Spectrum under-exposed — increasing to "
+                        f"{current_spec_ms:.3f} ms"
+                    )
 
             if not uv_needs_adjust and not spec_needs_adjust:
                 print("   Exposure adequate")
@@ -359,7 +372,9 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
             "uv_a_exposure_ms": uv1_result.metadata["exposure_ms_requested"],
             "uv_b_exposure_ms": uv2_result.metadata["exposure_ms_requested"],
             "uv_analogue_gain": cameras.analogue_gain,
-            "spectrometer_integration_time_us": current_spec_integration,
+            "spectrometer_integration_time_ms": spec_result.metadata[
+                "integration_time_ms"
+            ],
             "stack_count": stack_count,
             "saturation_retries": saturation_retries,
             "uv_camera_a_filter_nm": ch1,
@@ -383,7 +398,8 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
             state_path,
             cameras.exposure_ms,
             config_exposure,
-            current_spec_integration,
+            current_spec_ms,
+            config_spec_ms,
             timestamp.isoformat(),
         )
 

@@ -111,17 +111,15 @@ camera_2_port      = 1
 camera_1_filter_nm = 310     # Wavelength of the filter on camera_1 (nm)
 camera_2_filter_nm = 330     # Wavelength of the filter on camera_2 (nm)
 start_delay_s      = 0.5     # Warm-up delay after camera start() before first capture
-# Exposure per camera, in MILLISECONDS. The filters pass very different amounts
-# of light (sunlight at 310 nm is strongly attenuated by ozone; SO2 absorbs there
-# too), so each camera needs its own exposure to avoid saturating. Starting values
-# from the Nicaragua system with the same cameras: 310 nm ~600 ms, 330 nm ~65 ms.
+# Exposure per camera, in milliseconds. The filters pass very different amounts
+# of light, so each camera needs its own exposure to avoid saturating.
 # uv-sync auto-adjusts each camera to keep its brightest pixels at 20–80 % of full
 # scale and remembers the last good values; editing a value here makes it start
 # from the new value again.
-camera_1_exposure_ms = 600.0   # 310 nm
-camera_2_exposure_ms = 65.0    # 330 nm
-max_exposure_ms      = 1000.0  # Ceiling for auto-adjust (both cameras)
-analogue_gain        = 1.0     # Locked for both cameras; auto-exposure/auto-gain are disabled
+camera_1_exposure_ms = 1400     # 310 nm
+camera_2_exposure_ms = 100      # 330 nm
+max_exposure_ms      = 2000     # Ceiling for auto-adjust (both cameras)
+analogue_gain        = 1        # Locked for both cameras; auto-exposure/auto-gain are disabled
 
 [ultraviolet.controls]
 # Extra libcamera control overrides applied to both UV cameras.
@@ -132,12 +130,12 @@ analogue_gain        = 1.0     # Locked for both cameras; auto-exposure/auto-gai
 # Spectrometer — OceanInsight OceanHR4                     IMPLEMENTED
 # USB ID: 0999:1002  |  Device confirmed on RPi5 at /dev/bus/usb/003/002
 # Interface: USB via seabreeze (pyseabreeze backend)
-# Confirmed limits: integration_time_us in [3800, 10000000], bit_depth=16
+# Confirmed limits: integration time 3.8–10000 ms (3800–10000000 µs), bit_depth=16
 # ---------------------------------------------------------------------------
 
 [spectrometer]
 model               = "oceaninsight"
-integration_time_us = 400000   # µs — confirmed within [3800, 10000000]
+integration_time_ms = 400.0    # ms — device range 3.8–10000 ms (uv-sync auto-adjusts and remembers it)
 stacking            = 5        # Number of spectra averaged per measurement
 frame_count         = 1        # Measurements per CLI invocation
 framerate           = 0.016    # Hz (~1 measurement per minute)
