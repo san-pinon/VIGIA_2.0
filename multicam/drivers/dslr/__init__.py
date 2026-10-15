@@ -37,10 +37,10 @@ from .metering import (
 )
 
 
-def _check_canon_saturation(image: np.ndarray, target: float = 0.8) -> bool:
+def _check_canon_saturation(image: np.ndarray, target: float = 0.9) -> bool:
     """Return True if the Canon image 95th percentile exceeds target fraction of 255."""
 
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY) if image.ndim == 3 else image
     p95 = float(np.percentile(gray, 95))
     return p95 > (255 * target)
 
@@ -64,7 +64,7 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
     )
     flag_parser.add_argument("--iso", type=int, default=None)
     flag_parser.add_argument("--shutter", type=str, default=None)
-    flag_parser.add_argument("--check-saturation", action="store_true", default=False)
+    flag_parser.add_argument("--check-saturation", action="store_true", default=True)
     flag_parser.add_argument("--max-retries", type=int, default=3)
     flag_parser.add_argument("--output-dir", type=str, default=None)
     flags = flag_parser.parse_args(extra_args or [])
@@ -93,6 +93,7 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
     target_p95 = int(dslr_config.get("target_p95", 204))
     max_meter = int(dslr_config.get("max_meter_iterations", 5))
     tolerance = float(dslr_config.get("tolerance_pct", 10)) / 100.0
+    calibration_stops = float(dslr_config.get("calibration_stops", 0.0))
 
     iso = default_iso
     shutter_str = default_shutter
@@ -107,10 +108,9 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
             iso, shutter_str, last_picam_frame = meter_scene(
                 picam,
                 initial_iso=default_iso,
-                initial_shutter=str(default_shutter),
                 target_p95=target_p95,
                 max_iterations=max_meter,
-                tolerance=tolerance,
+                calibration_stops=calibration_stops,
             )
             metering_iterations = max_meter  # actual count logged in meter_scene
             print(f"   Metered settings: ISO={iso} shutter={shutter_str}")
@@ -157,7 +157,7 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
                 if attempt < flags.max_retries:
                     retries += 1
                     current = _parse_shutter(shutter_str)
-                    new_shutter = _clamp_shutter(current * 3 / 4)
+                    new_shutter = _clamp_shutter(current * 1 / 2)
                     shutter_str = _quantize_shutter(new_shutter)
                     continue
             break
@@ -167,9 +167,9 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
 
     # --- Save Canon image ---
     canon_fname = build_filename(
-        metadata_cfg, timestamp, suffix="canon", extension="png"
+        metadata_cfg, timestamp, suffix="canon", extension="jpg"
     )
-    cv2.imwrite(str(canon_archive / "receive" / canon_fname), canon_image)
+    cv2.imwrite(str(canon_archive / "receive" / canon_fname), cv2.cvtColor(canon_image, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 90])
     print(f"   Saved Canon image: {canon_fname}")
 
     # --- Save last picam frame ---

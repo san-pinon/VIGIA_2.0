@@ -146,6 +146,16 @@ def capture(camera: Camera, settings: dict | None = None) -> CaptureResult:
     if settings:
         canon_cfg.update(settings)
 
+    # --- Drain stale events before any USB I/O ---
+    # The infrared capture (sequential predecessor) can leave USB I/O in
+    # progress on a shared bus, causing gphoto2 error -110 on set_config or
+    # trigger_capture. Draining first clears that state.
+    drain_deadline = time.monotonic() + 2.0
+    while time.monotonic() < drain_deadline:
+        event_type, _ = camera.camera.wait_for_event(100)
+        if event_type == gp.GP_EVENT_TIMEOUT:
+            break
+
     # --- Apply camera settings (one round-trip for all widgets) ---
     widget_map = {"iso": "iso", "shutterspeed": "shutterspeed", "aperture": "aperture"}
     to_apply = {widget_map[k]: v for k, v in canon_cfg.items() if k in widget_map}
@@ -159,7 +169,15 @@ def capture(camera: Camera, settings: dict | None = None) -> CaptureResult:
     try:
         camera.camera.trigger_capture()
     except gp.GPhoto2Error as e:
-        raise CaptureFailure(f"Canon shutter trigger failed: {e}") from e
+        if e.code == -110:
+            # I/O still in progress — wait a moment and retry once
+            time.sleep(1.0)
+            try:
+                camera.camera.trigger_capture()
+            except gp.GPhoto2Error as e2:
+                raise CaptureFailure(f"Canon shutter trigger failed after retry: {e2}") from e2
+        else:
+            raise CaptureFailure(f"Canon shutter trigger failed: {e}") from e
 
     ts_monotonic_ns = time.monotonic_ns()
 
