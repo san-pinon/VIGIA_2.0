@@ -196,7 +196,11 @@ def run_cycle(args, orch_config: dict) -> dict:
     # --- Build local task list (run in parallel internally) ---
     local_tasks: list[tuple[list[str], str]] = []
 
-    if not args.no_uv:
+    # capture-uv-monitor.service, when running, owns the UV cameras and the
+    # spectrometer and captures every few seconds on its own; set
+    # orchestrator.uv_per_cycle = false then so the two don't contend.
+    uv_per_cycle = orch_config.get("uv_per_cycle", True)
+    if uv_per_cycle and not args.no_uv:
         local_tasks.append(
             (
                 [

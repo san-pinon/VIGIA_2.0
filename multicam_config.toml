@@ -113,13 +113,18 @@ camera_2_filter_nm = 330     # Wavelength of the filter on camera_2 (nm)
 start_delay_s      = 0.5     # Warm-up delay after camera start() before first capture
 # Exposure per camera, in milliseconds. The filters pass very different amounts
 # of light, so each camera needs its own exposure to avoid saturating.
-# uv-sync auto-adjusts each camera to keep its brightest pixels at 20–80 % of full
-# scale and remembers the last good values; editing a value here makes it start
-# from the new value again.
+# uv-sync auto-adjusts each camera to keep its bright end (99.9th percentile of the
+# raw image, above black level) at 20–80 % of full scale, and remembers the last
+# good values; editing a value here makes it start from the new value again.
 camera_1_exposure_ms = 1400     # 310 nm
 camera_2_exposure_ms = 100      # 330 nm
 max_exposure_ms      = 2000     # Ceiling for auto-adjust (both cameras)
 analogue_gain        = 1        # Locked for both cameras; auto-exposure/auto-gain are disabled
+# Images are the sensor's 10-bit RAW Bayer data (linear, no ISP processing), saved
+# in .npz with the black level (not subtracted) and the exposure.
+raw_format           = "SGBRG10"  # Unpacked 10-bit; "SGBRG10_CSI2P" (packed) also works
+binning              = 4        # Block-average NxN pixels: 1 (full 2592x1944), 2, 4 (648x486) or 8
+quicklook_png        = true     # Also save an 8-bit PNG preview per image (viewing only)
 
 [ultraviolet.controls]
 # Extra libcamera control overrides applied to both UV cameras.
@@ -186,7 +191,14 @@ baudrate = 4800    # confirmed on RPi5 /dev/ttyUSB0
 [uv_sync]
 output_dir    = "/home/user/data/uv/"
 default_stack = 5       # Number of spectra to co-add
-max_retries   = 3        # Saturation retry limit
+max_retries   = 3        # Saturation retry limit (single-shot mode)
+# --- `capture uv-sync --monitor` (devices kept open, capture-uv-monitor.service) ---
+monitor_interval_s    = 5     # Capture on round UTC multiples of this (s)
+min_sun_elevation_deg = 5     # Devices closed while the sun is below this
+# Site coordinates for the daylight gate (decimal degrees, north/east positive).
+# Without them the monitor captures day and night.
+# latitude  = 19.0
+# longitude = -98.6
 
 # ---------------------------------------------------------------------------
 # DSLR — picam-metered Canon capture                          IMPLEMENTED
@@ -216,3 +228,6 @@ ir_snapshot     = false  # Whether the cycle fires a single `capture infrared` s
                          # 24/7 (the Optris SDK is single-owner), and each monitor window's
                          # baseline frame serves as the IR snapshot. Set true only if you run
                          # the orchestrator WITHOUT the continuous monitor service.
+uv_per_cycle    = true   # Whether each cycle runs a single-shot `capture uv-sync`.
+                         # Set false when capture-uv-monitor.service is running: it owns
+                         # the UV cameras and spectrometer and captures every few seconds.

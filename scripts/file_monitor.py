@@ -145,8 +145,10 @@ def monitor_for_files(config_path: pathlib.Path | None = None) -> None:
         if "IN_CLOSE_WRITE" not in type_names and "IN_MOVED_TO" not in type_names:
             continue
 
-        # Ignore hidden/temporary files created by rsync pre-hash checks.
-        if filename.startswith("."):
+        # Ignore hidden/temporary files created by rsync pre-hash checks, and
+        # the ``*.tmp`` files capture code writes before renaming into place
+        # (the finished file arrives as IN_MOVED_TO).
+        if filename.startswith(".") or filename.endswith(".tmp"):
             continue
 
         filepath = pathlib.Path(path) / filename

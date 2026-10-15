@@ -1,0 +1,24 @@
+[Unit]
+Description=VIGIA 2.0 — continuous UV monitor (dual OV5647 raw + spectrometer)
+After=network.target
+
+[Service]
+User=user
+Type=simple
+WorkingDirectory=/home/user
+# Stream print() logs to journald live; without this Python block-buffers stdout.
+Environment=PYTHONUNBUFFERED=1
+Environment=LIBCAMERA_LOG_LEVELS=*:ERROR
+# Owns both UV cameras and the spectrometer while running and captures on round
+# UTC multiples of [uv_sync] monitor_interval_s. Set orchestrator.uv_per_cycle =
+# false so the orchestrator does not also run uv-sync. Add --no-spectrometer to
+# ExecStart when the spectrometer is not connected.
+ExecStart=/home/user/.venv/bin/multicamctl capture uv-sync --monitor
+Restart=always
+RestartSec=10
+# SIGTERM ends the loop after the current capture and closes the devices.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
