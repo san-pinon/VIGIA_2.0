@@ -195,10 +195,12 @@ max_retries   = 3        # Saturation retry limit (single-shot mode)
 # --- `capture uv-sync --monitor` (devices kept open, capture-uv-monitor.service) ---
 monitor_interval_s    = 5     # Capture on round UTC multiples of this (s)
 min_sun_elevation_deg = 5     # Devices closed while the sun is below this
-# Site coordinates for the daylight gate (decimal degrees, north/east positive).
+# Camera site for the daylight gate (decimal degrees, north/east positive).
 # Without them the monitor captures day and night.
-# latitude  = 19.0
-# longitude = -98.6
+latitude  = 19.067043     # UV camera site, ~4000 m a.s.l.
+longitude = -98.628232
+# Crater centre (for later plume geometry): 19.023444, -98.622460, rim 5200–5400 m a.s.l.
+# → ~4.9 km from the camera, bearing ~173° (SSE), ~14–16° above the horizon.
 
 # ---------------------------------------------------------------------------
 # DSLR — picam-metered Canon capture                          IMPLEMENTED
