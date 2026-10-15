@@ -115,7 +115,7 @@ start_delay_s      = 0.5     # Warm-up delay after camera start() before first c
 [ultraviolet.controls]
 # libcamera control overrides applied to both UV cameras.
 # Tune ExposureTime (µs) on-site to achieve ~50–70 % well fill.
-# ExposureTime = 500000
+ExposureTime = 500000   # field-tuned starting exposure (RPi live config, 2026-05); uv-sync prefers its saved state
 # AnalogueGain = 1.0
 
 # ---------------------------------------------------------------------------
