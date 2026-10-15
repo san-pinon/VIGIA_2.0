@@ -29,19 +29,20 @@ def synchronized_capture(
     spectrometer,
     stack_count: int = 10,
     spec_config: dict[str, Any] | None = None,
-) -> tuple[CaptureResult, CaptureResult, CaptureResult]:
+) -> tuple[CaptureResult, CaptureResult, CaptureResult | None]:
     """
     Barrier-synchronized capture of both UV cameras and the spectrometer.
 
-    All three acquisitions wait on a ``threading.Barrier(3)`` before
-    triggering, so they fire as close together as possible.
+    All acquisitions wait on a ``threading.Barrier`` before triggering, so
+    they fire as close together as possible. Pass ``spectrometer=None`` to
+    capture the two UV cameras only.
 
     Parameters
     ----------
     cameras:
         Initialised ``DualCamera`` (from ultraviolet driver).
     spectrometer:
-        Initialised ``Spectrometer`` (from spectrometer driver).
+        Initialised ``Spectrometer`` (from spectrometer driver), or ``None``.
     stack_count:
         Number of spectra to co-add.
     spec_config:
@@ -50,7 +51,8 @@ def synchronized_capture(
     Returns
     -------
     uv1_result, uv2_result, spec_result:
-        Capture results for camera 1, camera 2, and the spectrometer.
+        Capture results for camera 1, camera 2, and the spectrometer
+        (``None`` when no spectrometer was given).
 
     """
 
@@ -58,7 +60,8 @@ def synchronized_capture(
         capture as capture_spectrum,
     )
 
-    barrier = threading.Barrier(3, timeout=30)
+    use_spec = spectrometer is not None
+    barrier = threading.Barrier(3 if use_spec else 2, timeout=30)
     results: dict[str, Any] = {}
     errors: dict[str, Exception] = {}
 
@@ -82,8 +85,9 @@ def synchronized_capture(
     threads = [
         threading.Thread(target=_capture_uv, args=(1,), name="uv1"),
         threading.Thread(target=_capture_uv, args=(2,), name="uv2"),
-        threading.Thread(target=_capture_spec, name="spec"),
     ]
+    if use_spec:
+        threads.append(threading.Thread(target=_capture_spec, name="spec"))
     for t in threads:
         t.start()
     for t in threads:
@@ -93,8 +97,8 @@ def synchronized_capture(
         msgs = [f"{k}: {v}" for k, v in errors.items()]
         raise CaptureFailure(f"Synchronized capture failed: {'; '.join(msgs)}")
 
-    for key in ("uv1", "uv2", "spec"):
+    for key in ("uv1", "uv2", "spec") if use_spec else ("uv1", "uv2"):
         if key not in results:
             raise CaptureFailure(f"Synchronized capture: missing result for {key}")
 
-    return results["uv1"], results["uv2"], results["spec"]
+    return results["uv1"], results["uv2"], results.get("spec")

@@ -129,6 +129,7 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
     flag_parser.add_argument("--uv1-exposure-ms", type=float, default=None)
     flag_parser.add_argument("--uv2-exposure-ms", type=float, default=None)
     flag_parser.add_argument("--spec-integration-ms", type=float, default=None)
+    flag_parser.add_argument("--no-spectrometer", action="store_true")
     flags = flag_parser.parse_args(extra_args or [])
 
     uv_config = config["ultraviolet"]
@@ -156,11 +157,17 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
     saved_state = _read_uv_state(state_path)
 
     # --- Initialise devices ---
-    print("Initialising UV cameras and spectrometer...")
+    if flags.no_spectrometer:
+        print("Initialising UV cameras (spectrometer disabled)...")
+    else:
+        print("Initialising UV cameras and spectrometer...")
     cameras = DualCamera(uv_config)
-    spectrometer = Spectrometer(spec_config)
+    spectrometer = None
 
     try:
+        if not flags.no_spectrometer:
+            spectrometer = Spectrometer(spec_config)
+
         # Resolve each camera's starting exposure with precedence: explicit
         # CLI override > last converged value from a previous run (only while
         # the config value is unchanged) > config default. The two filters need
@@ -205,8 +212,9 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
         else:
             current_spec_ms, source = config_spec_ms, "config"
         current_spec_ms = max(SPEC_INT_MIN_MS, min(SPEC_INT_MAX_MS, current_spec_ms))
-        spectrometer.integration_time_ms = current_spec_ms
-        print(f"   Spectrometer: starting at {current_spec_ms:.3f} ms ({source})")
+        if spectrometer is not None:
+            spectrometer.integration_time_ms = current_spec_ms
+            print(f"   Spectrometer: starting at {current_spec_ms:.3f} ms ({source})")
 
         uv_bit_depth = 8  # RPi5 PiSP outputs 8-bit compressed raw
 
@@ -216,12 +224,16 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
         saturation_retries = 0
 
         for attempt in range(max_retries + 1):
+            spec_desc = (
+                f"spec int={current_spec_ms:.3f} ms"
+                if spectrometer is not None
+                else "no spectrometer"
+            )
             print(
                 f"   Capture attempt {attempt + 1} "
                 f"(UV {filters[1]} nm={cameras.exposure_ms[1]:.3f} ms, "
                 f"{filters[2]} nm={cameras.exposure_ms[2]:.3f} ms, "
-                f"spec int={current_spec_ms:.3f} ms, "
-                f"stack={stack_count})"
+                f"{spec_desc}, stack={stack_count})"
             )
 
             try:
@@ -277,42 +289,43 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
             uv_needs_adjust = bool(uv_changed)
 
             # --- Spectrum saturation check ---
-            spectrum = spec_result.artifacts["spectrum"]
-            spec_sat = check_spectrum_saturation(
-                spectrum, spectrometer, min_saturation=0.2, max_saturation=0.8
-            )
-
             spec_needs_adjust = False
-            if spec_sat == -1:
-                new_ms = max(SPEC_INT_MIN_MS, current_spec_ms * 0.75)
-                if new_ms == current_spec_ms:
-                    print(
-                        "   WARNING: Spectrum saturated at minimum integration — "
-                        "saving anyway"
-                    )
-                else:
-                    current_spec_ms = new_ms
-                    spectrometer.integration_time_ms = current_spec_ms
-                    spec_needs_adjust = True
-                    print(
-                        f"   Spectrum over-exposed — reducing to "
-                        f"{current_spec_ms:.3f} ms"
-                    )
-            elif spec_sat == 1:
-                new_ms = min(SPEC_INT_MAX_MS, current_spec_ms * 1.25)
-                if new_ms == current_spec_ms:
-                    print(
-                        "   WARNING: Spectrum under-exposed at maximum integration — "
-                        "saving anyway"
-                    )
-                else:
-                    current_spec_ms = new_ms
-                    spectrometer.integration_time_ms = current_spec_ms
-                    spec_needs_adjust = True
-                    print(
-                        f"   Spectrum under-exposed — increasing to "
-                        f"{current_spec_ms:.3f} ms"
-                    )
+            if spec_result is not None:
+                spectrum = spec_result.artifacts["spectrum"]
+                spec_sat = check_spectrum_saturation(
+                    spectrum, spectrometer, min_saturation=0.2, max_saturation=0.8
+                )
+
+                if spec_sat == -1:
+                    new_ms = max(SPEC_INT_MIN_MS, current_spec_ms * 0.75)
+                    if new_ms == current_spec_ms:
+                        print(
+                            "   WARNING: Spectrum saturated at minimum integration — "
+                            "saving anyway"
+                        )
+                    else:
+                        current_spec_ms = new_ms
+                        spectrometer.integration_time_ms = current_spec_ms
+                        spec_needs_adjust = True
+                        print(
+                            f"   Spectrum over-exposed — reducing to "
+                            f"{current_spec_ms:.3f} ms"
+                        )
+                elif spec_sat == 1:
+                    new_ms = min(SPEC_INT_MAX_MS, current_spec_ms * 1.25)
+                    if new_ms == current_spec_ms:
+                        print(
+                            "   WARNING: Spectrum under-exposed at maximum "
+                            "integration — saving anyway"
+                        )
+                    else:
+                        current_spec_ms = new_ms
+                        spectrometer.integration_time_ms = current_spec_ms
+                        spec_needs_adjust = True
+                        print(
+                            f"   Spectrum under-exposed — increasing to "
+                            f"{current_spec_ms:.3f} ms"
+                        )
 
             if not uv_needs_adjust and not spec_needs_adjust:
                 print("   Exposure adequate")
@@ -350,18 +363,21 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
         print(f"   Saved UV image: {uv2_fname}")
 
         # Spectrum as CSV (wavelength, intensity)
-        spec_fname = build_filename(
-            metadata_cfg, timestamp, suffix="spectrum", extension="csv"
-        )
-        wavelengths = spec_result.metadata.get("wavelengths", [])
-        intensities = spec_result.artifacts["spectrum"]
-        csv_path = spec_output_dir / "receive" / spec_fname
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["wavelength_nm", "intensity"])
-            for wl, inten in zip(wavelengths, intensities, strict=True):
-                writer.writerow([round(wl, 4), round(float(inten), 4)])
-        print(f"   Saved spectrum: {spec_fname}")
+        spec_fname = None
+        intensities = None
+        if spec_result is not None:
+            spec_fname = build_filename(
+                metadata_cfg, timestamp, suffix="spectrum", extension="csv"
+            )
+            wavelengths = spec_result.metadata.get("wavelengths", [])
+            intensities = spec_result.artifacts["spectrum"]
+            csv_path = spec_output_dir / "receive" / spec_fname
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["wavelength_nm", "intensity"])
+                for wl, inten in zip(wavelengths, intensities, strict=True):
+                    writer.writerow([round(wl, 4), round(float(inten), 4)])
+            print(f"   Saved spectrum: {spec_fname}")
 
         # Metadata JSON
         meta_fname = build_filename(
@@ -372,17 +388,21 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
             "uv_a_exposure_ms": uv1_result.metadata["exposure_ms_requested"],
             "uv_b_exposure_ms": uv2_result.metadata["exposure_ms_requested"],
             "uv_analogue_gain": cameras.analogue_gain,
-            "spectrometer_integration_time_ms": spec_result.metadata[
-                "integration_time_ms"
-            ],
+            "spectrometer_integration_time_ms": (
+                spec_result.metadata["integration_time_ms"] if spec_result else None
+            ),
             "stack_count": stack_count,
             "saturation_retries": saturation_retries,
             "uv_camera_a_filter_nm": ch1,
             "uv_camera_b_filter_nm": ch2,
             "uv_camera_a": uv1_result.metadata,
             "uv_camera_b": uv2_result.metadata,
-            "spectrum_mean_intensity": round(float(np.mean(intensities)), 2),
-            "spectrum_max_intensity": round(float(np.max(intensities)), 2),
+            "spectrum_mean_intensity": (
+                round(float(np.mean(intensities)), 2) if spec_result else None
+            ),
+            "spectrum_max_intensity": (
+                round(float(np.max(intensities)), 2) if spec_result else None
+            ),
             "files": {
                 "uv_a": uv1_fname,
                 "uv_b": uv2_fname,
@@ -420,5 +440,6 @@ def capture_uv_sync(config: dict, extra_args: list[str] | None = None) -> None:
         sys.exit(0)
 
     finally:
-        spectrometer.shutdown()
+        if spectrometer is not None:
+            spectrometer.shutdown()
         cameras.close()
