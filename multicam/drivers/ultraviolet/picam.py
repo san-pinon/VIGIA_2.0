@@ -6,7 +6,9 @@ column-amount retrieval using the dual-band ratio technique.
 
 Images are taken from the sensor's **raw** stream (10-bit Bayer, no ISP
 processing), so pixel values are linear in light — required for absorbance.
-They can be binned (block-averaged) on capture to cut noise and file size.
+They can be binned on capture to cut noise and file size: each output pixel is
+the **sum** of an N×N block of raw pixels, kept as uint16 (exact; divide by
+N² for the per-pixel mean).
 
 :copyright:
     2026, Conor A. Bacon.
@@ -132,6 +134,21 @@ def black_level_dn(frame_metadata: Mapping[str, Any]) -> float:
         return DEFAULT_BLACK_LEVEL_DN
     # libcamera reports black levels on a 16-bit scale.
     return float(np.mean(levels)) / 2 ** (16 - RAW_BIT_DEPTH)
+
+
+def bin_sum(mosaic: np.ndarray, factor: int) -> np.ndarray:
+    """
+    Sum ``factor``×``factor`` blocks of raw pixels into uint16 (exact: up to
+    8×8 blocks of 10-bit values fit, 64 × 1023 = 65472). Even factors merge
+    whole 2×2 Bayer cells. ``factor = 1`` returns the mosaic unchanged.
+    """
+
+    if factor == 1:
+        return mosaic
+    h = mosaic.shape[0] - mosaic.shape[0] % factor
+    w = mosaic.shape[1] - mosaic.shape[1] % factor
+    blocks = mosaic[:h, :w].reshape(h // factor, factor, w // factor, factor)
+    return blocks.sum(axis=(1, 3), dtype=np.uint32).astype(np.uint16)
 
 
 def bin_mosaic(mosaic: np.ndarray, factor: int) -> np.ndarray:
@@ -328,9 +345,11 @@ class DualCamera:
         """
         Capture one raw frame from camera ``n``.
 
-        The artifact ``image`` is the (optionally binned) 10-bit raw mosaic —
-        black level *not* subtracted; ``black_level_dn`` in the metadata gives
-        it. ``saturated_fraction`` is measured on the unbinned raw pixels.
+        The artifact ``image`` is the raw mosaic as uint16; when binned, each
+        pixel is the *sum* of a ``binning``×``binning`` block (divide by
+        ``binning**2`` for the per-pixel mean). Black level is *not*
+        subtracted; ``black_level_dn`` (per raw pixel) in the metadata gives it.
+        ``saturated_fraction`` is measured on the unbinned raw pixels.
         """
 
         try:
@@ -350,7 +369,7 @@ class DualCamera:
         saturated_fraction = (
             float(np.count_nonzero(mosaic >= SATURATED_DN)) / mosaic.size
         )
-        image = bin_mosaic(mosaic, self.binning)
+        image = bin_sum(mosaic, self.binning)
         return CaptureResult(
             metadata={
                 "ts_monotonic_ns": ts,
@@ -363,6 +382,9 @@ class DualCamera:
                 "bayer_order": BAYER_ORDER,
                 "bit_depth": RAW_BIT_DEPTH,
                 "binning": self.binning,
+                "pixel_value": (
+                    "raw DN" if self.binning == 1 else "sum of binning² raw DN"
+                ),
                 "black_level_dn": round(black_level_dn(frame_md), 3),
                 "saturated_fraction": round(saturated_fraction, 6),
                 "shape": tuple(image.shape),
@@ -448,23 +470,29 @@ def raw_brightness(result: CaptureResult, percentile: float = 99.9) -> float:
     """
 
     black = float(result.metadata["black_level_dn"])
-    value = float(np.percentile(result.artifacts["image"], percentile))
+    blocks = int(result.metadata.get("binning", 1)) ** 2
+    value = float(np.percentile(result.artifacts["image"], percentile)) / blocks
     return max(0.0, (value - black) / (RAW_MAX_DN - black))
 
 
-def quicklook(image: np.ndarray, black: float, max_width: int = 648) -> np.ndarray:
+def quicklook(
+    image: np.ndarray, black: float, binning: int = 1, max_width: int = 648
+) -> np.ndarray:
     """
     8-bit preview of a raw UV image, for viewing only (not for analysis).
 
     Fixed scale (black level → full scale) with a display gamma, so frames
     stay comparable: a dim preview means a genuinely under-exposed image.
     Downsampled by block-averaging to at most ``max_width`` pixels wide.
+    ``binning`` converts summed pixels back to per-raw-pixel values.
     """
+
+    image = image.astype(np.float32) / binning**2
 
     factor = 1
     while image.shape[1] // factor > max_width:
         factor *= 2
-    small = bin_mosaic(image, factor) if factor > 1 else image.astype(np.float32)
+    small = bin_mosaic(image, factor) if factor > 1 else image
     level = np.clip((small - black) / (RAW_MAX_DN - black), 0.0, 1.0)
     return np.round(255.0 * level ** (1 / 2.2)).astype(np.uint8)
 

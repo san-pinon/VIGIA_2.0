@@ -135,6 +135,9 @@ class _UVSession:
         self.kind = flags.kind
         self.use_spec = not flags.no_spectrometer
         self.write_quicklook = bool(self.uv_config.get("quicklook_png", True))
+        self.quicklook_interval_s = float(
+            self.sync_config.get("quicklook_interval_s", 60.0)
+        )
         self.stack_count = flags.stack or int(self.sync_config.get("default_stack", 5))
 
         self.output_dir = pathlib.Path(
@@ -382,6 +385,7 @@ class _UVSession:
         spec: CaptureResult | None,
         timestamp: dt,
         extra: dict,
+        quicklook_png: bool = True,
     ) -> dict:
         """Write images, quick-looks, spectrum and metadata; return the file names."""
 
@@ -411,11 +415,11 @@ class _UVSession:
             _atomic_write(receive / npz_name, _write_npz)
             files[label] = npz_name
 
-            if self.write_quicklook:
+            if self.write_quicklook and quicklook_png:
                 png_name = build_filename(
                     self.metadata_cfg, timestamp, suffix=stem, extension="png"
                 )
-                preview = quicklook(image, md["black_level_dn"])
+                preview = quicklook(image, md["black_level_dn"], md["binning"])
 
                 def _write_png(tmp, preview=preview):
                     ok, buf = cv2.imencode(".png", preview)
@@ -734,6 +738,8 @@ def _run_monitor(session: _UVSession, flags: argparse.Namespace) -> None:
                     "interval_s": interval,
                     "capture_completed_utc": completed.isoformat(),
                 },
+                # One preview per quicklook_interval_s (default: the :00 tick).
+                quicklook_png=(tick_epoch % session.quicklook_interval_s) < interval,
             )
             session.persist(tick)
 
