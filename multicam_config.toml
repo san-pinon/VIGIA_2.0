@@ -72,7 +72,10 @@ monitor_abs_max_c  = 0.0    # Optional: also keep if frame ROI max temp >= this 
 nuc_drift_c        = 0.5    # Re-NUC once the chip temp drifts this far (°C) since the last NUC.
                             # Field test 2026-06-22: ~0.5 °C drift took ~176 s after power-on.
 nuc_min_interval_s = 120    # Hard floor between NUCs (protects the shutter from oscillating chip temp).
-nuc_max_interval_s = 0      # Optional safety ceiling: force a NUC after this many seconds (0 = disabled).
+nuc_max_interval_s = 1800   # Safety ceiling: force a NUC after this many seconds (0 = disabled).
+                            # Needed with the imager XML's <autoflag><enable>0 (2026-10-21): the SDK
+                            # then never flags by itself. The metadata chip temperature is the real
+                            # sensor even with tchipmode = 2, so the drift trigger above works.
 
 # ---------------------------------------------------------------------------
 # Visible-spectrum camera                                  IMPLEMENTED (picam)
