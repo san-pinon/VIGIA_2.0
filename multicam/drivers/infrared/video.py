@@ -451,6 +451,11 @@ def _run_monitor(
         if stop["flag"]:
             break
 
+        # Grab the frame first, so writing out the previous window (below)
+        # cannot delay the first frame of the new one.
+        capture_result = capture_stream_frame(camera)
+        utcnow = dt.now(UTC)
+
         # Tumbling windows on round UTC multiples of window_s (the epsilon keeps
         # a tick that lands exactly on a boundary in the new window).
         window_id = math.floor(tick_epoch / flags.window_s + 1e-6)
@@ -468,15 +473,28 @@ def _run_monitor(
         win["nuc_events"].extend(pending_nucs)
         pending_nucs = []
 
-        capture_result = capture_stream_frame(camera)
-
         # Skip NUC/settling frames — they read as uniform and would skew metrics
-        # and pollute the baseline. trigger_nuc already consumes shutter-closed
-        # frames; this is the belt-and-suspenders guard.
+        # and pollute the baseline — but log them, so a gap in the frame times
+        # always has a visible cause (e.g. the SDK's own autoflag cycle).
         if capture_result.metadata.flagState != 0:
+            win["all_stats"].append(
+                {
+                    "frame": win["frame_count"],
+                    "timestamp_utc": utcnow.isoformat(),
+                    "chip_temp_c": round(float(capture_result.metadata.tempChip), 2),
+                    "ambient_c": None,
+                    "hot_pixel_count": None,
+                    "temperature_max_c": None,
+                    "fraction_at_max": None,
+                    "fraction_at_low_limit": None,
+                    "flag_state": int(capture_result.metadata.flagState),
+                    "kept": False,
+                    "reason": "shutter",
+                }
+            )
+            win["frame_count"] += 1
             continue
 
-        utcnow = dt.now(UTC)
         raw_thermal = capture_result.artifacts["image"]
         last_chip_temp = float(capture_result.metadata.tempChip)
 
