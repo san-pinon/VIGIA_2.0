@@ -7,9 +7,12 @@ Two modes share one capture loop, throttle, and NUC machinery:
   keeps every frame as a single compressed ``.npz`` cube plus a summary JSON.
   Useful for drift/NUC characterisation runs.
 - **Monitor (``--monitor``):** runs continuously (24/7) at a target rate,
-  emitting one file set per tumbling time window. Within each window it keeps the
-  first valid frame (a baseline) plus only the frames that clear an activity
-  threshold, so a quiet minute collapses to a single frame. Temperature-triggered
+  emitting one file set per tumbling time window. Frames are taken on round UTC
+  multiples of the frame period and windows start on round UTC multiples of the
+  window length, so IR frames coincide with the other instruments' captures.
+  Within each window it keeps the first valid frame (a baseline) plus only the
+  frames that clear an activity threshold, so a quiet minute collapses to a
+  single frame. Temperature-triggered
   NUC keeps shutter actuations to a minimum.
 
 See ``capture_video`` for details.
@@ -24,6 +27,7 @@ See ``capture_video`` for details.
 
 import argparse
 import json
+import math
 import os
 import pathlib
 import signal
@@ -51,6 +55,7 @@ from .optris import (
     capture_stream_frame,
     trigger_nuc,
 )
+from .temperature_range import describe, raw_to_celsius
 
 
 def _parse_flags(
@@ -176,6 +181,7 @@ def capture_video(config: dict, extra_args: list[str] | None = None) -> None:
     if instrument_config["model"] != "optris":
         raise ValueError("Invalid camera model.")
     camera = OptrisCamera(instrument_config)
+    print(f"   ...{describe(camera.measuring_range)}")
 
     start_utc = dt.now(UTC)
     try:
@@ -219,7 +225,9 @@ def _run_burst(
     """Fixed-frame recorder: capture ``flags.frames`` frames into one ``.npz`` cube."""
 
     period_s = 1.0 / flags.rate
-    t_max = float(instrument_config.get("t_max", 900.0))
+    irange = camera.measuring_range
+    # t_max in the config only overrides the top of the selected range.
+    t_max = float(instrument_config.get("t_max", irange["max_c"]))
     sat_threshold = float(instrument_config.get("saturation_pixel_threshold", 0.05))
 
     nuc_events: list[dict] = [initial_nuc]
@@ -266,8 +274,8 @@ def _run_burst(
         raw_thermal = capture_result.artifacts["image"]
         idx = len(frames)
 
-        stats = _thermal_stats(raw_thermal)
-        temps = (raw_thermal.astype(np.float64) - 1000.0) / 10.0
+        stats = _thermal_stats(raw_thermal, irange)
+        temps = raw_to_celsius(raw_thermal, irange["decimals"])
         stats["temperature_median_c"] = round(float(np.median(temps)), 1)
 
         entry = {
@@ -281,7 +289,7 @@ def _run_burst(
         }
         if flags.check_saturation:
             entry["saturation_warning"] = _check_thermal_saturation(
-                raw_thermal, t_max, sat_threshold
+                raw_thermal, t_max, sat_threshold, irange["decimals"]
             )
 
         frames.append(raw_thermal)
@@ -315,6 +323,7 @@ def _run_burst(
         "target_rate_hz": flags.rate,
         "frame_count": len(frames),
         "frame_shape": list(cube.shape[1:]),
+        "measuring_range": irange,
         "nuc_events": nuc_events,
         "hottest_max_frame": {
             "frame": hottest_max["frame"],
@@ -337,12 +346,15 @@ def _run_burst(
     print(json.dumps(summary))
 
 
-def _new_window(nuc_events: list[dict] | None = None) -> dict:
-    """Fresh per-window accumulator for monitor mode."""
+def _new_window(tick_epoch: float, window_id: int) -> dict:
+    """Fresh per-window accumulator for monitor mode, opened at its first tick."""
 
     return {
-        "start_utc": dt.now(UTC),
-        "start_mono": time.monotonic(),
+        # First frame tick in the window: the round UTC window boundary, except
+        # for the partial window after start-up (keeps restarts from reusing a
+        # filename).
+        "start_utc": dt.fromtimestamp(tick_epoch, UTC),
+        "window_id": window_id,
         "frame_count": 0,
         "baseline_frame": None,
         "kept_frames": [],
@@ -350,7 +362,7 @@ def _new_window(nuc_events: list[dict] | None = None) -> dict:
         "kept_indices": [],
         "kept_reasons": [],
         "all_stats": [],
-        "nuc_events": list(nuc_events or []),
+        "nuc_events": [],
     }
 
 
@@ -364,6 +376,10 @@ def _run_monitor(
 ) -> None:
     """
     Continuous monitor: stream at the target rate, emit one file set per window.
+
+    Frames are taken on round UTC multiples of the frame period (``1 / rate``)
+    and windows tumble on round UTC multiples of ``window_s`` (60 s → whole
+    minutes), so frame and file times line up with the other instruments.
 
     Keeps only the first valid frame of each window (baseline) plus frames that
     clear an activity threshold; compact stats for *every* frame are still
@@ -384,28 +400,23 @@ def _run_monitor(
     signal.signal(signal.SIGINT, _handle_stop)
 
     print(
-        f"   ...entering monitor loop (@ {flags.rate} Hz, {flags.window_s:.0f}s "
-        f"windows, ROI={roi or 'full'})..."
+        f"   ...entering monitor loop (@ {flags.rate} Hz on the UTC clock, "
+        f"{flags.window_s:.0f}s windows, ROI={roi or 'full'})..."
     )
 
     run_start = time.monotonic()
-    last_capture_start = None
     last_nuc = time.monotonic()
     # Seeded from the mandatory start-up NUC the caller just ran.
     chip_temp_at_last_nuc = float(camera.metadata.tempChip)
     last_chip_temp = chip_temp_at_last_nuc
 
-    win = _new_window([initial_nuc])
+    # Windows open at their first frame tick; NUCs wait here until then.
+    win = None
+    pending_nucs = [initial_nuc]
 
     while not stop["flag"]:
         if flags.duration_s > 0 and time.monotonic() - run_start >= flags.duration_s:
             break
-
-        # Tumbling-window boundary: flush and start a fresh window.
-        if time.monotonic() - win["start_mono"] >= flags.window_s:
-            if win["kept_frames"]:
-                _flush_window(win, flags, metadata_cfg, instrument_config, archive)
-            win = _new_window()
 
         # Temperature-triggered NUC (replaces the burst's fixed interval).
         secs_since_nuc = time.monotonic() - last_nuc
@@ -418,7 +429,7 @@ def _run_monitor(
             flags.nuc_max_interval_s,
         ):
             elapsed = trigger_nuc(camera)
-            win["nuc_events"].append(
+            pending_nucs.append(
                 {
                     "timestamp_utc": dt.now(UTC).isoformat(),
                     "duration_s": round(elapsed, 2),
@@ -426,20 +437,37 @@ def _run_monitor(
             )
             last_nuc = time.monotonic()
             chip_temp_at_last_nuc = float(camera.metadata.tempChip)
-            # Resync cadence so the NUC stall doesn't fire a catch-up frame.
-            last_capture_start = time.monotonic()
             print(f"      ...temp-triggered NUC ({elapsed:.1f}s)...")
             continue
 
-        # Wall-clock throttle to the target rate.
-        if (
-            last_capture_start is not None
-            and time.monotonic() - last_capture_start < period_s
-        ):
-            time.sleep(0.002)
-            continue
+        # Wait for the next round UTC multiple of the frame period. Ticks missed
+        # during a NUC are skipped, not caught up.
+        tick_epoch = (math.floor(time.time() / period_s) + 1) * period_s
+        while not stop["flag"]:
+            remaining = tick_epoch - time.time()
+            if remaining <= 0:
+                break
+            time.sleep(min(remaining, 0.5))
+        if stop["flag"]:
+            break
 
-        last_capture_start = time.monotonic()
+        # Tumbling windows on round UTC multiples of window_s (the epsilon keeps
+        # a tick that lands exactly on a boundary in the new window).
+        window_id = math.floor(tick_epoch / flags.window_s + 1e-6)
+        if win is None or window_id != win["window_id"]:
+            if win is not None and win["kept_frames"]:
+                _flush_window(
+                    win,
+                    flags,
+                    metadata_cfg,
+                    instrument_config,
+                    archive,
+                    camera.measuring_range,
+                )
+            win = _new_window(tick_epoch, window_id)
+        win["nuc_events"].extend(pending_nucs)
+        pending_nucs = []
+
         capture_result = capture_stream_frame(camera)
 
         # Skip NUC/settling frames — they read as uniform and would skew metrics
@@ -453,7 +481,7 @@ def _run_monitor(
         last_chip_temp = float(capture_result.metadata.tempChip)
 
         metrics = _monitor_frame_metrics(
-            raw_thermal, roi, flags.bg_percentile, flags.delta_c
+            raw_thermal, roi, flags.bg_percentile, flags.delta_c, camera.measuring_range
         )
         idx = win["frame_count"]
 
@@ -477,6 +505,8 @@ def _run_monitor(
                 "ambient_c": round(metrics["ambient_c"], 1),
                 "hot_pixel_count": metrics["hot_pixel_count"],
                 "temperature_max_c": round(metrics["temperature_max_c"], 1),
+                "fraction_at_max": metrics["fraction_at_max"],
+                "fraction_at_low_limit": metrics["fraction_at_low_limit"],
                 "flag_state": int(capture_result.metadata.flagState),
                 "kept": reason is not None,
                 "reason": reason,
@@ -491,8 +521,11 @@ def _run_monitor(
             win["kept_reasons"].append(reason)
 
     # Flush whatever is in flight (clean stop / duration reached).
-    if win["kept_frames"]:
-        _flush_window(win, flags, metadata_cfg, instrument_config, archive)
+    if win is not None and win["kept_frames"]:
+        win["nuc_events"].extend(pending_nucs)
+        _flush_window(
+            win, flags, metadata_cfg, instrument_config, archive, camera.measuring_range
+        )
     print("...monitor stopped. Final window flushed.")
 
 
@@ -502,6 +535,7 @@ def _flush_window(
     metadata_cfg: dict,
     instrument_config: dict,
     archive: pathlib.Path,
+    irange: dict,
 ) -> None:
     """
     Write one window's outputs (``.npz`` cube + baseline ``.png`` + metadata JSON).
@@ -542,9 +576,15 @@ def _flush_window(
         temp_max_c=float(instrument_config["colourmap_max_c"])
         if "colourmap_max_c" in instrument_config
         else None,
+        decimals=irange["decimals"],
     )
-    png_tmp = receive / (colour_name + ".tmp.png")
-    cv2.imwrite(str(png_tmp), colour)
+    # Encode in memory: a "*.tmp.png" temp name would not be skipped by the
+    # file monitor (it ignores "*.tmp" only).
+    ok, png = cv2.imencode(".png", colour)
+    if not ok:
+        raise OSError("PNG encoding failed")
+    png_tmp = receive / (colour_name + ".tmp")
+    png_tmp.write_bytes(png.tobytes())
     os.replace(png_tmp, receive / colour_name)
 
     # --- Metadata JSON (stats for every frame, kept or not) ---
@@ -561,6 +601,7 @@ def _flush_window(
         "frames_in_window": win["frame_count"],
         "frames_kept": len(win["kept_frames"]),
         "frame_shape": list(cube.shape[1:]),
+        "measuring_range": irange,
         "retention": {
             "roi": list(flags.roi) if flags.roi else None,
             "bg_percentile": flags.bg_percentile,

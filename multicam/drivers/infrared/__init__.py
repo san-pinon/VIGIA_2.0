@@ -32,12 +32,14 @@ from .optris import (
 from .optris import (
     capture as capture_optris,
 )
+from .temperature_range import clip_fractions, describe, raw_to_celsius
 
 
 def _check_thermal_saturation(
     thermal_frame: np.ndarray,
     t_max: float,
     threshold: float = 0.05,
+    decimals: int = 1,
 ) -> bool:
     """
     Check if a thermal frame is saturated.
@@ -50,6 +52,8 @@ def _check_thermal_saturation(
         Maximum temperature (°C) of the sensor range.
     threshold:
         Fraction of pixels at or above T_max to trigger a warning.
+    decimals:
+        Raw-value decimals of the measuring range.
 
     Returns
     -------
@@ -58,20 +62,27 @@ def _check_thermal_saturation(
 
     """
 
-    temp_frame = (thermal_frame.astype(np.float64) - 1000.0) / 10.0
+    temp_frame = raw_to_celsius(thermal_frame, decimals)
     fraction_at_max = np.mean(temp_frame >= t_max)
     return bool(fraction_at_max > threshold)
 
 
-def _thermal_stats(thermal_frame: np.ndarray) -> dict:
-    """Compute min/max/mean temperature from raw Optris uint16 values."""
+def _thermal_stats(thermal_frame: np.ndarray, irange: dict | None = None) -> dict:
+    """
+    Compute min/max/mean temperature from raw Optris uint16 values, plus the
+    fractions of pixels clipped at either end of the measuring range when
+    ``irange`` (``Camera.measuring_range``) is given.
+    """
 
-    temp_frame = (thermal_frame.astype(np.float64) - 1000.0) / 10.0
-    return {
+    temp_frame = raw_to_celsius(thermal_frame, irange["decimals"] if irange else 1)
+    stats = {
         "temperature_min_c": round(float(temp_frame.min()), 1),
         "temperature_max_c": round(float(temp_frame.max()), 1),
         "temperature_mean_c": round(float(temp_frame.mean()), 1),
     }
+    if irange:
+        stats.update(clip_fractions(temp_frame, irange))
+    return stats
 
 
 def _scene_background(temp_roi: np.ndarray, percentile: float) -> float:
@@ -90,6 +101,7 @@ def _monitor_frame_metrics(
     roi: tuple[int, int, int, int] | None,
     bg_percentile: float,
     delta_c: float,
+    irange: dict | None = None,
 ) -> dict:
     """
     Per-frame activity metrics for monitor-mode retention.
@@ -109,15 +121,20 @@ def _monitor_frame_metrics(
         Percentile of the ROI used as the ambient/background estimate.
     delta_c:
         °C above background a pixel must exceed to count as "hot".
+    irange:
+        ``Camera.measuring_range``: raw-value decimals and the range limits for
+        the clipped-pixel fractions. ``None`` → 1 decimal, no fractions.
 
     Returns
     -------
     metrics:
-        ``{ambient_c, hot_pixel_count, temperature_max_c}`` over the ROI.
+        ``{ambient_c, hot_pixel_count, temperature_max_c}`` over the ROI, plus
+        ``fraction_at_max`` / ``fraction_at_low_limit`` over the full frame when
+        ``irange`` is given.
 
     """
 
-    temp_frame = (thermal_frame.astype(np.float64) - 1000.0) / 10.0
+    temp_frame = raw_to_celsius(thermal_frame, irange["decimals"] if irange else 1)
     if roi is not None:
         x0, y0, x1, y1 = roi
         temp_roi = temp_frame[y0:y1, x0:x1]
@@ -126,11 +143,14 @@ def _monitor_frame_metrics(
 
     ambient = _scene_background(temp_roi, bg_percentile)
     hot_pixel_count = int(np.count_nonzero(temp_roi > ambient + delta_c))
-    return {
+    metrics = {
         "ambient_c": ambient,
         "hot_pixel_count": hot_pixel_count,
         "temperature_max_c": float(temp_roi.max()),
     }
+    if irange:
+        metrics.update(clip_fractions(temp_frame, irange))
+    return metrics
 
 
 def _should_nuc(
@@ -213,7 +233,10 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
     (archive / "receive").mkdir(parents=True, exist_ok=True)
 
     metadata_cfg = config["metadata"]
-    t_max = float(instrument_config.get("t_max", 900.0))
+    irange = camera.measuring_range
+    print(f"   ...{describe(irange)}")
+    # t_max in the config only overrides the top of the selected range.
+    t_max = float(instrument_config.get("t_max", irange["max_c"]))
     sat_threshold = float(instrument_config.get("saturation_pixel_threshold", 0.05))
 
     frames, starttime = 0, dt.now(UTC)
@@ -235,12 +258,12 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
 
             utcnow = dt.now(UTC)
             raw_thermal = capture_result.artifacts["image"]
-            stats = _thermal_stats(raw_thermal)
+            stats = _thermal_stats(raw_thermal, irange)
 
             saturation_warning = False
             if flags.check_saturation:
                 saturation_warning = _check_thermal_saturation(
-                    raw_thermal, t_max, sat_threshold
+                    raw_thermal, t_max, sat_threshold, irange["decimals"]
                 )
                 if saturation_warning:
                     print(
@@ -265,6 +288,7 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
                     temp_max_c=float(instrument_config["colourmap_max_c"])
                     if "colourmap_max_c" in instrument_config
                     else None,
+                    decimals=irange["decimals"],
                 )
                 colour_name = build_filename(
                     metadata_cfg, utcnow, suffix="colour", extension="png", frame=frames
@@ -279,6 +303,7 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
                 "timestamp_utc": utcnow.isoformat(),
                 **stats,
                 "saturation_warning": saturation_warning,
+                "measuring_range": irange,
                 "files": {"thermal_tiff": tiff_name},
             }
             (archive / "receive" / meta_name).write_text(

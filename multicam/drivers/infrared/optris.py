@@ -21,6 +21,8 @@ import numpy as np
 from multicam.drivers import CaptureResult
 from multicam.errors import CaptureFailure
 
+from .temperature_range import measuring_range, raw_to_celsius
+
 libname = find_library("irdirectsdk")
 if not libname:
     raise RuntimeError("Could not find irdirectsdk via find_library()")
@@ -131,6 +133,8 @@ class Camera:
         )
 
         self._config = dict(config)
+        # Selected range, its lowest reported value and raw-value decimals.
+        self.measuring_range = measuring_range(config["xml_path"])
 
     def close(self) -> None:
         """Close camera resources (idempotent)."""
@@ -162,13 +166,14 @@ def _convert_temp2image(
     frame: np.ndarray,
     temp_min_c: float | None = None,
     temp_max_c: float | None = None,
+    decimals: int = 1,
 ) -> np.ndarray:
     """
     Convert raw Optris uint16 thermal data to a false-colour RGB image.
 
     The Optris camera outputs values that can be related to temperature by:
 
-        Temperature = (value - 1000) / 10
+        Temperature = (value - 1000) / 10**decimals   (decimals = 1 for most ranges)
 
     Parameters
     ----------
@@ -180,6 +185,8 @@ def _convert_temp2image(
     temp_max_c:
         Upper bound of the colour scale in °C.  If ``None`` (default), the
         98th percentile of the scene is used (auto-scale).
+    decimals:
+        Raw-value decimals of the measuring range (see ``temperature_range``).
 
     Returns
     -------
@@ -188,7 +195,7 @@ def _convert_temp2image(
 
     """
 
-    temps = (frame.astype(np.float64) - 1000.0) / 10.0
+    temps = raw_to_celsius(frame, decimals)
 
     lo = float(np.percentile(temps, 2)) if temp_min_c is None else temp_min_c
     hi = float(np.percentile(temps, 98)) if temp_max_c is None else temp_max_c
