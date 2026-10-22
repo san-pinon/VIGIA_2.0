@@ -47,7 +47,7 @@ def _write_images(
     for i, result in enumerate(results):
         ch = result.metadata.get("filter_nm", default_filters[i])
         fname = build_filename(metadata, timestamp, suffix=f"uv-{ch}", extension="npz")
-        np.savez(output_dir / fname, image=result.artifacts["image"])
+        np.savez_compressed(output_dir / fname, image=result.artifacts["image"])
         print(f"      Saved: {fname}")
 
 

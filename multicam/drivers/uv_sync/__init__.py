@@ -488,7 +488,7 @@ class _UVSession:
 
             def _write_npz(tmp, image=image, md=md):
                 with open(tmp, "wb") as fh:
-                    np.savez(
+                    np.savez_compressed(
                         fh,
                         image=image,
                         black_level_dn=md["black_level_dn"],
