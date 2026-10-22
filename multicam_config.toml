@@ -127,7 +127,21 @@ start_delay_s      = 0.5     # Warm-up delay after camera start() before first c
 # good values; editing a value here makes it start from the new value again.
 camera_1_exposure_ms = 1400     # 310 nm
 camera_2_exposure_ms = 300      # 330 nm
-max_exposure_ms      = 2000     # Ceiling for auto-adjust (both cameras)
+max_exposure_ms      = 2575     # Ceiling for auto-adjust (both cameras); ≥ the top ladder rung
+# The OV5647 dark offset is flat up to ~1000 ms but wanders above it, except on a
+# few narrow flat spots. Auto-exposure is continuous up to continuous_max_ms and
+# above it uses only the ladder values (set on the flat spots), so every long
+# frame has a matching dark. Omit exposure_ladder_ms to allow any exposure.
+continuous_max_ms    = 1000
+exposure_ladder_ms   = [1700, 2100, 2575]
+settle_frames        = 1        # Frames are flagged "settling" until this many exposures after a change
+# Measured black level (DN, 10-bit) per exposure, from the dark library: rows of
+# [exposure_ms, offset]: each row applies at its exposure (±1 ms), the first row also to
+# everything shorter; other exposures fall back to libcamera.
+# Without them black_level_dn is libcamera's fixed 16. Fill in from the I9 dark library;
+# B-bis values for camera 1 (camera 2 at 2100/2575 still to measure in the normal state):
+# camera_1_black_levels = [[1000, 17.70], [1700, 14.57], [2100, 16.03], [2575, 15.35]]
+# camera_2_black_levels = [[1000, 15.59], [1700, 13.45]]
 analogue_gain        = 1        # Locked for both cameras; auto-exposure/auto-gain are disabled
 # Images are the sensor's 10-bit RAW Bayer data (linear, no ISP processing), saved
 # in .npz as uint16 with the black level (not subtracted), exposure and binning.

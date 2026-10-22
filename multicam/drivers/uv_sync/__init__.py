@@ -21,6 +21,12 @@ Two modes:
 ``--kind dark|clear`` tags a capture set (filenames and metadata). Dark
 captures keep the exposure fixed — cover the lenses/fibre first.
 
+**Exposure ladder.** The OV5647 dark offset wanders with exposure above ~1 s
+(flat only on a few narrow spots). With ``[ultraviolet] exposure_ladder_ms``
+set, plume/clear exposures stay continuous up to ``continuous_max_ms`` and
+above it take only the ladder values, so every long frame has a matching
+dark. Dark captures use the exposure as given.
+
 :copyright:
     2026, Santiago Pinon.
 :license:
@@ -55,6 +61,7 @@ from multicam.drivers.spectrometer.oceaninsight import (
     configured_integration_ms,
 )
 from multicam.drivers.ultraviolet.picam import (
+    DEFAULT_MAX_EXPOSURE_MS,
     DualCamera,
     configured_exposure_ms,
     quicklook,
@@ -83,6 +90,7 @@ UV_CLIPPED_FRACTION = 0.001
 UV_HEAVILY_CLIPPED_FRACTION = 0.1
 
 KINDS = ("plume", "dark", "clear")
+DEFAULT_CONTINUOUS_MAX_MS = 1000.0
 DEFAULT_MONITOR_INTERVAL_S = 5.0
 DEFAULT_MIN_SUN_ELEVATION_DEG = 5.0
 
@@ -101,6 +109,25 @@ def _next_uv_exposure(
         return None
     factor = UV_TARGET_BRIGHTNESS / max(brightness, 0.01)
     return exposure_ms * min(4.0, max(0.25, factor))
+
+
+def _snap_to_ladder(
+    exposure_ms: float, ladder: list[float], continuous_max_ms: float
+) -> float:
+    """
+    Nearest allowed exposure: anything up to ``continuous_max_ms`` as is,
+    above it the closest (by ratio) of ``continuous_max_ms`` and the ladder.
+
+    Neighbouring rungs are much closer than the brightness band is wide
+    (0.2–0.8), so a snapped exposure still lands in band and needs no extra
+    hysteresis: exposure only changes when a frame is out of band.
+    """
+
+    if not ladder or exposure_ms <= continuous_max_ms:
+        return exposure_ms
+    return min(
+        [continuous_max_ms, *ladder], key=lambda e: abs(math.log(exposure_ms / e))
+    )
 
 
 def _read_uv_state(state_path: pathlib.Path) -> dict:
@@ -206,6 +233,24 @@ class _UVSession:
             spec_start, self.spec_source = self.config_spec_ms, "config"
         self.spec_ms = max(SPEC_INT_MIN_MS, min(SPEC_INT_MAX_MS, spec_start))
 
+        # Exposure ladder (plume/clear only): rungs above the continuous range
+        # and within max_exposure_ms (a clamped rung would be off the ladder).
+        self.continuous_max_ms = float(
+            self.uv_config.get("continuous_max_ms", DEFAULT_CONTINUOUS_MAX_MS)
+        )
+        max_ms = float(self.uv_config.get("max_exposure_ms", DEFAULT_MAX_EXPOSURE_MS))
+        ladder = sorted(float(e) for e in self.uv_config.get("exposure_ladder_ms", []))
+        self.ladder = [e for e in ladder if self.continuous_max_ms < e <= max_ms]
+        dropped = [e for e in ladder if e not in self.ladder]
+        if dropped:
+            print(
+                f"   WARNING: exposure_ladder_ms values {dropped} ignored: outside "
+                f"continuous_max_ms {self.continuous_max_ms:g} – max_exposure_ms "
+                f"{max_ms:g}"
+            )
+        if self.kind == "dark":
+            self.ladder = []
+
         self.cameras: DualCamera | None = None
         self.spectrometer: Spectrometer | None = None
 
@@ -228,6 +273,7 @@ class _UVSession:
                 self.spectrometer = Spectrometer(self.spec_config)
             for n in (1, 2):
                 start_ms, source = self.start_exposure[n]
+                start_ms = self.allowed_exposure_ms(start_ms)
                 if start_ms != self.cameras.exposure_ms[n]:
                     self.cameras.set_exposure(n, start_ms)
                 # Make sure manual exposure/gain are in effect before capturing.
@@ -258,6 +304,11 @@ class _UVSession:
             self.cameras = None
 
     # --- capture + exposure control ---------------------------------------
+
+    def allowed_exposure_ms(self, exposure_ms: float) -> float:
+        """``exposure_ms`` snapped to the ladder (unchanged without one)."""
+
+        return _snap_to_ladder(exposure_ms, self.ladder, self.continuous_max_ms)
 
     def capture(self) -> tuple[CaptureResult, CaptureResult, CaptureResult | None]:
         return synchronized_capture(
@@ -294,8 +345,10 @@ class _UVSession:
         Measure each capture and set new exposures for the next one.
 
         Annotates each UV result's metadata with ``brightness`` and
-        ``exposure_status`` (ok / under / over / clipped / limit / fixed).
-        Returns True if any exposure was changed (another try is useful).
+        ``exposure_status`` (ok / under / over / clipped / limit / fixed /
+        settling). A settling frame may predate the last change, so it is
+        not used to adjust again. Returns True if any exposure was changed
+        (another try is useful).
         """
 
         changed = []
@@ -310,6 +363,9 @@ class _UVSession:
             if self.kind == "dark":
                 md["exposure_status"] = "fixed"
                 continue
+            if md.get("settling"):
+                md["exposure_status"] = "settling"
+                continue
             new_ms = _next_uv_exposure(frame_ms, brightness, md["saturated_fraction"])
             if new_ms is None:
                 md["exposure_status"] = "ok"
@@ -321,7 +377,7 @@ class _UVSession:
                 else ("over" if brightness > UV_MAX_BRIGHTNESS else "under")
             )
             old_ms = self.cameras.exposure_ms[n]
-            new_ms = self.cameras.set_exposure(n, new_ms)
+            new_ms = self.cameras.set_exposure(n, self.allowed_exposure_ms(new_ms))
             if new_ms == old_ms:
                 md["exposure_status"] = "limit"
                 if verbose:

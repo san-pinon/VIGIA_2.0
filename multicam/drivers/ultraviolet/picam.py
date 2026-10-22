@@ -41,6 +41,11 @@ else:
 DEFAULT_EXPOSURE_MS = 50.0
 MIN_EXPOSURE_MS = 0.1
 DEFAULT_MAX_EXPOSURE_MS = 1000.0
+# Frames are flagged ``settling`` until they were taken at the requested
+# exposure and started at least this many exposures after it was requested.
+DEFAULT_SETTLE_FRAMES = 1
+# Reported vs requested exposure/gain closer than this count as applied.
+_EXPOSURE_TOLERANCE = 0.05
 
 # Controls DualCamera sets itself; ignored in [ultraviolet.controls].
 _MANAGED_CONTROLS = {
@@ -191,6 +196,10 @@ class DualCamera:
         camera_1_exposure_ms = 1400
         camera_2_exposure_ms = 100
         max_exposure_ms      = 2000    # optional, auto-adjust ceiling
+        settle_frames        = 1       # optional, see capture_one()
+        # optional: measured black level per exposure, rows of
+        # [exposure_ms, offset_dn] (see black_level()); else libcamera's value.
+        camera_1_black_levels = [[1000, 17.69], [1700, 14.58]]
         analogue_gain        = 1.0     # optional, default 1.0
         raw_format           = "SGBRG10"  # optional; or "SGBRG10_CSI2P"
         binning              = 4       # optional: 1, 2, 4 or 8
@@ -224,6 +233,17 @@ class DualCamera:
         self.exposure_ms = {
             n: self.clamp_exposure_ms(configured_exposure_ms(config, n)) for n in (1, 2)
         }
+        self.settle_frames = int(config.get("settle_frames", DEFAULT_SETTLE_FRAMES))
+        self.black_levels = {
+            n: sorted(
+                (float(max_ms), float(offset))
+                for max_ms, offset in config.get(f"camera_{n}_black_levels", [])
+            )
+            for n in (1, 2)
+        }
+        # When each camera's exposure was last changed (CLOCK_MONOTONIC, the
+        # clock of libcamera's SensorTimestamp).
+        self.changed_ns = {n: time.monotonic_ns() for n in (1, 2)}
         self.binning = int(config.get("binning", 1))
         if self.binning not in _VALID_BINNING:
             raise ValueError(
@@ -307,8 +327,52 @@ class DualCamera:
         exposure_ms = self.clamp_exposure_ms(exposure_ms)
         cam = self.camera(n)
         cam.set_controls(self._manual_controls(cam, exposure_ms))
+        if exposure_ms != self.exposure_ms[n]:
+            self.changed_ns[n] = time.monotonic_ns()
         self.exposure_ms[n] = exposure_ms
         return exposure_ms
+
+    def black_level(self, n: int, exposure_ms: float) -> tuple[float, str] | None:
+        """
+        Measured offset (DN) for camera ``n`` at ``exposure_ms`` and its
+        source, or None. A row applies at its own exposure (±1 ms: the sensor
+        rounds to whole lines); the shortest row also covers everything
+        below it (the range where the offset is flat).
+        """
+
+        rows = self.black_levels[n]
+        if not rows:
+            return None
+        if exposure_ms <= rows[0][0] + 1.0:
+            return rows[0][1], f"config ≤{rows[0][0]:g} ms"
+        for row_ms, offset in rows[1:]:
+            if abs(exposure_ms - row_ms) <= 1.0:
+                return offset, f"config {row_ms:g} ms"
+        return None
+
+    def _settling(self, n: int, frame_md: Mapping[str, Any]) -> tuple[bool, int | None]:
+        """
+        Whether a frame from camera ``n`` may still be affected by the last
+        exposure change, and ms from that change to the frame's start.
+
+        Settling = not yet at the requested exposure/gain, or started less than
+        ``settle_frames`` exposures after the change was requested.
+        """
+
+        target_us = _ms_to_us(self.exposure_ms[n])
+        actual_us = frame_md.get("ExposureTime", 0)
+        actual_gain = frame_md.get("AnalogueGain", 0.0)
+        mismatch = (
+            abs(actual_us - target_us) > _EXPOSURE_TOLERANCE * target_us
+            or abs(actual_gain - self.analogue_gain)
+            > _EXPOSURE_TOLERANCE * self.analogue_gain
+        )
+        sensor_ns = frame_md.get("SensorTimestamp")
+        if not sensor_ns:
+            return mismatch, None
+        since_ms = (sensor_ns - self.changed_ns[n]) / 1e6
+        too_soon = since_ms < self.settle_frames * self.exposure_ms[n]
+        return mismatch or too_soon, round(since_ms)
 
     def settle_exposure(
         self, n: int, max_frames: int = 6, tolerance: float = 0.05
@@ -348,8 +412,13 @@ class DualCamera:
         The artifact ``image`` is the raw mosaic as uint16; when binned, each
         pixel is the *sum* of a ``binning``×``binning`` block (divide by
         ``binning**2`` for the per-pixel mean). Black level is *not*
-        subtracted; ``black_level_dn`` (per raw pixel) in the metadata gives it.
+        subtracted; ``black_level_dn`` (per raw pixel) in the metadata gives it:
+        the measured value from ``camera_<n>_black_levels`` when the config has
+        one for this exposure, else libcamera's (``black_level_source``).
         ``saturated_fraction`` is measured on the unbinned raw pixels.
+        ``settling`` marks frames that may still show the last exposure
+        change (see ``_settling``); they are saved but should be skipped in
+        processing.
         """
 
         try:
@@ -366,6 +435,11 @@ class DualCamera:
             raise CaptureFailure(f"UV camera_{n} capture failed: {e}") from e
 
         ts = time.monotonic_ns()
+        sensor_black = black_level_dn(frame_md)
+        exposure_actual_ms = frame_md.get("ExposureTime", 0) / 1000
+        measured = self.black_level(n, exposure_actual_ms)
+        black, black_source = measured or (sensor_black, "libcamera")
+        settling, since_change_ms = self._settling(n, frame_md)
         saturated_fraction = (
             float(np.count_nonzero(mosaic >= SATURATED_DN)) / mosaic.size
         )
@@ -385,12 +459,16 @@ class DualCamera:
                 "pixel_value": (
                     "raw DN" if self.binning == 1 else "sum of binning² raw DN"
                 ),
-                "black_level_dn": round(black_level_dn(frame_md), 3),
+                "black_level_dn": round(black, 3),
+                "black_level_source": black_source,
+                "sensor_black_level_dn": round(sensor_black, 3),
                 "saturated_fraction": round(saturated_fraction, 6),
                 "shape": tuple(image.shape),
                 "dtype": str(image.dtype),
                 "exposure_ms_requested": round(self.exposure_ms[n], 3),
-                "exposure_ms_actual": round(frame_md.get("ExposureTime", 0) / 1000, 3),
+                "exposure_ms_actual": round(exposure_actual_ms, 3),
+                "settling": settling,
+                "ms_since_exposure_change": since_change_ms,
                 "analogue_gain_requested": self.analogue_gain,
                 "analogue_gain_actual": round(frame_md.get("AnalogueGain", 0.0), 4),
                 "digital_gain_actual": round(frame_md.get("DigitalGain", 0.0), 4),
