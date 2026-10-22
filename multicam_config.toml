@@ -217,6 +217,8 @@ default_stack = 5       # Number of spectra to co-add
 max_retries   = 3        # Saturation retry limit (single-shot mode)
 # --- `capture uv-sync --monitor` (devices kept open, capture-uv-monitor.service) ---
 monitor_interval_s    = 5     # Capture on round UTC multiples of this (s)
+monitor_spec_budget_s = 4     # Monitor: max time per spectrum, (stack + 1 burn-in) × integration;
+                              # fewer spectra co-added as integration grows, integration ≤ half of this
 quicklook_interval_s  = 60    # Monitor: PNG previews only on the tick at each multiple of this (s)
 min_sun_elevation_deg = 5     # Devices closed while the sun is below this
 # Camera site for the daylight gate (decimal degrees, north/east positive).

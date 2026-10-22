@@ -16,7 +16,9 @@ Two modes:
   UTC multiples of ``monitor_interval_s`` (default 5 s), correcting exposure
   from one capture to the next. Devices are closed while the sun is below
   ``min_sun_elevation_deg`` (when the site coordinates are configured). Stops
-  cleanly on SIGTERM/SIGINT; run as ``capture-uv-monitor.service``.
+  cleanly on SIGTERM/SIGINT; run as ``capture-uv-monitor.service``. The
+  spectrum must fit in ``monitor_spec_budget_s``: fewer spectra are co-added
+  as integration grows, and integration is capped at half the budget.
 
 ``--kind dark|clear`` tags a capture set (filenames and metadata). Dark
 captures keep the exposure fixed — cover the lenses/fibre first.
@@ -92,6 +94,8 @@ UV_HEAVILY_CLIPPED_FRACTION = 0.1
 KINDS = ("plume", "dark", "clear")
 DEFAULT_CONTINUOUS_MAX_MS = 1000.0
 DEFAULT_MONITOR_INTERVAL_S = 5.0
+# Monitor: time allowed for one spectrum, (stack + 1 burn-in) × integration.
+DEFAULT_MONITOR_SPEC_BUDGET_S = 4.0
 DEFAULT_MIN_SUN_ELEVATION_DEG = 5.0
 
 
@@ -231,7 +235,10 @@ class _UVSession:
             spec_start, self.spec_source = self.good_spec_ms, "last run"
         else:
             spec_start, self.spec_source = self.config_spec_ms, "config"
-        self.spec_ms = max(SPEC_INT_MIN_MS, min(SPEC_INT_MAX_MS, spec_start))
+        self.spec_max_ms = SPEC_INT_MAX_MS
+        self.spec_ms = max(SPEC_INT_MIN_MS, min(self.spec_max_ms, spec_start))
+        # Monitor mode sets a time budget per spectrum (see set_spec_budget).
+        self.spec_budget_ms: float | None = None
 
         # Exposure ladder (plume/clear only): rungs above the continuous range
         # and within max_exposure_ms (a clamped rung would be off the ladder).
@@ -305,6 +312,27 @@ class _UVSession:
 
     # --- capture + exposure control ---------------------------------------
 
+    def set_spec_budget(self, budget_s: float) -> None:
+        """
+        Fit each spectrum into ``budget_s``: a capture takes (stack + 1) ×
+        integration (one burn-in spectrum is discarded), so cap integration
+        at half the budget (stack 1) and co-add fewer spectra as it grows.
+        """
+
+        self.spec_budget_ms = budget_s * 1000
+        self.spec_max_ms = max(
+            SPEC_INT_MIN_MS, min(SPEC_INT_MAX_MS, self.spec_budget_ms / 2)
+        )
+        self.spec_ms = min(self.spec_ms, self.spec_max_ms)
+
+    def spec_stack(self) -> int:
+        """Spectra to co-add at the current integration time."""
+
+        if self.spec_budget_ms is None:
+            return self.stack_count
+        fits = math.floor(self.spec_budget_ms / self.spec_ms) - 1
+        return max(1, min(self.stack_count, fits))
+
     def allowed_exposure_ms(self, exposure_ms: float) -> float:
         """``exposure_ms`` snapped to the ladder (unchanged without one)."""
 
@@ -314,10 +342,10 @@ class _UVSession:
         return synchronized_capture(
             self.cameras,
             self.spectrometer,
-            stack_count=self.stack_count,
+            stack_count=self.spec_stack(),
             spec_config={
                 "integration_time_ms": self.spec_ms,
-                "stacking": self.stack_count,
+                "stacking": self.spec_stack(),
             },
         )
 
@@ -330,7 +358,7 @@ class _UVSession:
         return (
             f"UV {self.filters[1]} nm={self.cameras.exposure_ms[1]:.3f} ms, "
             f"{self.filters[2]} nm={self.cameras.exposure_ms[2]:.3f} ms, "
-            f"{spec}, stack={self.stack_count}"
+            f"{spec}, stack={self.spec_stack()}"
         )
 
     def adjust(
@@ -410,7 +438,7 @@ class _UVSession:
             else:
                 factor = 0.75 if spec_sat == -1 else 1.25
                 new_ms = max(
-                    SPEC_INT_MIN_MS, min(SPEC_INT_MAX_MS, self.spec_ms * factor)
+                    SPEC_INT_MIN_MS, min(self.spec_max_ms, self.spec_ms * factor)
                 )
                 if new_ms == self.spec_ms:
                     if verbose:
@@ -524,7 +552,7 @@ class _UVSession:
             "spectrometer_integration_time_ms": (
                 spec.metadata["integration_time_ms"] if spec else None
             ),
-            "stack_count": self.stack_count if spec else None,
+            "stack_count": spec.metadata["stacking"] if spec else None,
             "uv_camera_a_filter_nm": uv1.metadata["filter_nm"],
             "uv_camera_b_filter_nm": uv2.metadata["filter_nm"],
             "uv_camera_a": uv1.metadata,
@@ -698,6 +726,15 @@ def _run_monitor(session: _UVSession, flags: argparse.Namespace) -> None:
     interval = float(flags.interval_s)
     if interval <= 0:
         raise ValueError("--interval-s must be positive")
+    spec_budget_s = float(
+        session.sync_config.get("monitor_spec_budget_s", DEFAULT_MONITOR_SPEC_BUDGET_S)
+    )
+    if spec_budget_s >= interval:
+        print(
+            f"   WARNING: monitor_spec_budget_s {spec_budget_s:g} ≥ interval "
+            f"{interval:g} s — captures with the spectrometer will overrun"
+        )
+    session.set_spec_budget(spec_budget_s)
 
     lat = session.sync_config.get("latitude")
     lon = session.sync_config.get("longitude")
@@ -723,6 +760,12 @@ def _run_monitor(session: _UVSession, flags: argparse.Namespace) -> None:
         f"   ...entering UV monitor loop (every {interval:g} s on the UTC clock, "
         f"kind={session.kind}"
         + (f", daylight gate: sun ≥ {min_elev:g}°" if gate else "")
+        + (
+            f", spectrum ≤ {spec_budget_s:g} s (integration ≤ "
+            f"{session.spec_max_ms:g} ms)"
+            if session.use_spec
+            else ""
+        )
         + ")..."
     )
 
@@ -784,7 +827,7 @@ def _run_monitor(session: _UVSession, flags: argparse.Namespace) -> None:
             completed = dt.now(UTC)
 
             session.adjust(uv1, uv2, spec, settle=False, verbose=False)
-            files = session.save(
+            session.save(
                 uv1,
                 uv2,
                 spec,
@@ -806,10 +849,15 @@ def _run_monitor(session: _UVSession, flags: argparse.Namespace) -> None:
                     f"b={m['brightness']:.2f} {m['exposure_status']}"
                 )
 
+            spec_txt = (
+                f"spec {spec.metadata['integration_time_ms']:.0f} ms "
+                f"×{spec.metadata['stacking']}"
+                if spec is not None
+                else "no spectrum"
+            )
             elapsed = time.time() - tick_epoch
             print(
-                f"[{tick:%H:%M:%S}] {_cam(uv1)} | {_cam(uv2)} | "
-                f"{'spec ' + files['spectrum'] if files['spectrum'] else 'no spectrum'}"
+                f"[{tick:%H:%M:%S}] {_cam(uv1)} | {_cam(uv2)} | {spec_txt}"
                 f" | {elapsed:.1f} s"
                 + (
                     f"  WARNING: overran {interval:g} s interval"
