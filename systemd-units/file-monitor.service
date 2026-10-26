@@ -6,8 +6,10 @@ After=network.target
 User=user
 Type=simple
 WorkingDirectory=/home/user
+# Stream print() logs to journald live; without this Python block-buffers stdout.
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/home/user/.venv/bin/python /home/user/multicam/scripts/file_monitor.py
-Restart=on-failure
+Restart=always
 RestartSec=10s
 
 [Install]
