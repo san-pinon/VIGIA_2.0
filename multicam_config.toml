@@ -57,12 +57,17 @@ nuc_interval_s    = 0    # Seconds between NUC shutter calibrations during a BUR
 # --- `capture infrared-video --monitor` (continuous 24/7 monitor) ---
 # Runs forever at video_rate_hz, emitting one file set per tumbling window. Frames are taken
 # on round UTC multiples of 1/video_rate_hz and windows start on round UTC multiples of
-# monitor_window_s (60 → whole minutes), so IR lines up with the UV/visible captures.
-# a .npz of the kept frames, a baseline colour .png (dashboard quick-look), and
-# a metadata .json holding stats for EVERY frame (kept or not). Per window it
-# keeps the first valid frame plus only frames that clear the activity trigger,
-# so a quiet window collapses to a single frame.
-monitor_window_s   = 60     # Seconds per output window (tumbling, non-overlapping).
+# monitor_window_s (10 → :00, :10, …), so IR lines up with the UV/visible captures.
+# Per window: a .npz of the kept frames, a baseline colour .png (dashboard quick-look,
+# see monitor_png_interval_s) and a metadata .json with stats for EVERY frame (kept or
+# not). monitor_keep picks what is kept (the trigger keys below apply to "activity").
+monitor_window_s   = 10     # Seconds per output window (tumbling, non-overlapping).
+monitor_keep       = "baseline"  # "baseline": keep one frame per window (its first valid frame,
+                                 # on the round 10 s tick); in-between frames only feed the NUC
+                                 # logic and the per-frame stats. "activity": also keep frames
+                                 # that clear the trigger below.
+monitor_png_interval_s = 60  # Colour quick-look PNG only for windows starting on a multiple of
+                             # this (s); 0 = every window.
 monitor_bg_percentile = 20  # Percentile of the ROI used as the per-frame ambient/background.
 monitor_delta_c    = 8.0    # °C above ambient a pixel must exceed to count as "hot".
 monitor_min_pixels = 25     # Keep a frame if this many ROI pixels are over-ambient.
@@ -216,7 +221,7 @@ output_dir    = "/home/user/data/uv/"
 default_stack = 5       # Number of spectra to co-add
 max_retries   = 3        # Saturation retry limit (single-shot mode)
 # --- `capture uv-sync --monitor` (devices kept open, capture-uv-monitor.service) ---
-monitor_interval_s    = 5     # Capture on round UTC multiples of this (s)
+monitor_interval_s    = 10    # Capture on round UTC multiples of this (s); same as IR
 monitor_spec_budget_s = 4     # Monitor: max time per spectrum, (stack + 1 burn-in) × integration;
                               # fewer spectra co-added as integration grows, integration ≤ half of this
 quicklook_interval_s  = 60    # Monitor: PNG previews only on the tick at each multiple of this (s)
@@ -241,24 +246,23 @@ target_p95           = 128    # 50% of 255 — EV metering target brightness
 calibration_stops    = 0.0    # tune in field: negative if Canon overexposes, positive if underexposes
 
 # ---------------------------------------------------------------------------
-# Orchestrator — capture cycle coordinator                    IMPLEMENTED
-# Runs on uvcam (RPi5). SSHes into multicam for IR and DSLR captures.
+# Orchestrator — scheduler + service supervisor                IMPLEMENTED
+# Runs on uvcam (RPi5) as vigia-orchestrator.service. UV (uvcam) and IR (multicam) run
+# as their own services, every 10 s ([uv_sync] monitor_interval_s, [infrared]
+# monitor_window_s). The orchestrator fires the slower captures on round UTC multiples
+# of their interval (a task still running at its next tick skips it) and checks the
+# two services, starting them again if they are down.
 # ---------------------------------------------------------------------------
 
 [orchestrator]
-interval_s      = 60
+schedule        = { dslr = 30, environmental = 60 }   # seconds, aligned to the UTC clock
+supervise       = ["capture-uv-monitor.service", "multicam:capture-ir-video.service"]
+supervise_interval_s = 60
+supervise_restart    = true   # start a supervised unit that is inactive/failed (sudo -n)
 multicam_host   = "192.168.30.150"
 multicam_user   = "user"
 remote_venv_bin = "/home/user/.venv/bin/multicamctl"
 log_path        = "/home/user/logs/orchestrator.log"
-ir_snapshot     = false  # Whether the cycle fires a single `capture infrared` snapshot.
-                         # false: the continuous capture-ir-video.service owns the Optris
-                         # 24/7 (the Optris SDK is single-owner), and each monitor window's
-                         # baseline frame serves as the IR snapshot. Set true only if you run
-                         # the orchestrator WITHOUT the continuous monitor service.
-uv_per_cycle    = false  # Whether each cycle runs a single-shot `capture uv-sync`.
-                         # Set false when capture-uv-monitor.service is running: it owns
-                         # the UV cameras and spectrometer and captures every few seconds.
 
 # ---------------------------------------------------------------------------
 # File monitor — receive/ → archive/ (scripts/file_monitor.py)  IMPLEMENTED

@@ -1,0 +1,26 @@
+[Unit]
+Description=VIGIA 2.0 — orchestrator (Canon + environmental schedule, supervises the UV/IR monitors)
+After=network-online.target chrony.service
+Wants=network-online.target
+
+[Service]
+User=user
+Type=simple
+WorkingDirectory=/home/user
+Environment=PYTHONUNBUFFERED=1
+# Wait (up to ~5 min) for chrony to sync, so the first captures carry a good
+# time; the leading "-" starts the orchestrator anyway if it never syncs (the
+# Witty Pi RTC still gives a close time).
+ExecStartPre=-/usr/bin/chronyc waitsync 30 0.5
+# Runs on uvcam. Schedules [orchestrator] schedule on the UTC clock and checks
+# the [orchestrator] supervise units (capture-uv-monitor here,
+# capture-ir-video on multicam), starting them if they are down.
+ExecStart=/home/user/.venv/bin/vigia-orchestrator
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStartSec=400
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

@@ -10,10 +10,10 @@ Two modes share one capture loop, throttle, and NUC machinery:
   emitting one file set per tumbling time window. Frames are taken on round UTC
   multiples of the frame period and windows start on round UTC multiples of the
   window length, so IR frames coincide with the other instruments' captures.
-  Within each window it keeps the first valid frame (a baseline) plus only the
-  frames that clear an activity threshold, so a quiet minute collapses to a
-  single frame. Temperature-triggered
-  NUC keeps shutter actuations to a minimum.
+  Within each window it keeps the first valid frame (a baseline) plus, with
+  ``--keep activity``, the frames that clear an activity threshold; with
+  ``--keep baseline`` only the baseline, i.e. one frame per window (e.g. one
+  every 10 s). Temperature-triggered NUC keeps shutter actuations to a minimum.
 
 See ``capture_video`` for details.
 
@@ -93,6 +93,16 @@ def _parse_flags(
         "--duration-s",
         type=float,
         default=0.0,  # 0 = run until SIGTERM/SIGINT
+    )
+    flag_parser.add_argument(
+        "--keep",
+        choices=("activity", "baseline"),
+        default=str(instrument_config.get("monitor_keep", "activity")),
+    )
+    flag_parser.add_argument(
+        "--png-interval-s",
+        type=float,
+        default=float(instrument_config.get("monitor_png_interval_s", 0.0)),
     )
     flag_parser.add_argument(
         "--delta-c",
@@ -381,8 +391,9 @@ def _run_monitor(
     and windows tumble on round UTC multiples of ``window_s`` (60 s → whole
     minutes), so frame and file times line up with the other instruments.
 
-    Keeps only the first valid frame of each window (baseline) plus frames that
-    clear an activity threshold; compact stats for *every* frame are still
+    Keeps the first valid frame of each window (baseline) plus, with
+    ``--keep activity``, frames that clear an activity threshold; compact stats
+    for *every* frame are still
     recorded so thresholds can be retuned after the fact. NUC is temperature
     triggered to spare the shutter. Flushes the in-progress window on
     SIGTERM/SIGINT for a clean ``systemctl stop``.
@@ -401,7 +412,7 @@ def _run_monitor(
 
     print(
         f"   ...entering monitor loop (@ {flags.rate} Hz on the UTC clock, "
-        f"{flags.window_s:.0f}s windows, ROI={roi or 'full'})..."
+        f"{flags.window_s:g}s windows, keep={flags.keep}, ROI={roi or 'full'})..."
     )
 
     run_start = time.monotonic()
@@ -503,9 +514,11 @@ def _run_monitor(
         )
         idx = win["frame_count"]
 
-        # Presence/activity trigger — no baseline comparison.
-        triggered = metrics["hot_pixel_count"] >= flags.min_pixels or (
-            flags.abs_max_c > 0 and metrics["temperature_max_c"] >= flags.abs_max_c
+        # Presence/activity trigger — no baseline comparison. Off with
+        # --keep baseline (one frame per window, whatever happens in between).
+        triggered = flags.keep == "activity" and (
+            metrics["hot_pixel_count"] >= flags.min_pixels
+            or (flags.abs_max_c > 0 and metrics["temperature_max_c"] >= flags.abs_max_c)
         )
 
         reason = None
@@ -547,6 +560,39 @@ def _run_monitor(
     print("...monitor stopped. Final window flushed.")
 
 
+def _write_colour_png(
+    win: dict,
+    metadata_cfg: dict,
+    instrument_config: dict,
+    receive: pathlib.Path,
+    irange: dict,
+) -> str:
+    """Write the window's baseline frame as a false-colour PNG; return its name."""
+
+    colour_name = build_filename(
+        metadata_cfg, win["start_utc"], suffix="colour", extension="png"
+    )
+    colour = _convert_temp2image(
+        win["baseline_frame"],
+        temp_min_c=float(instrument_config["colourmap_min_c"])
+        if "colourmap_min_c" in instrument_config
+        else None,
+        temp_max_c=float(instrument_config["colourmap_max_c"])
+        if "colourmap_max_c" in instrument_config
+        else None,
+        decimals=irange["decimals"],
+    )
+    # Encode in memory: a "*.tmp.png" temp name would not be skipped by the
+    # file monitor (it ignores "*.tmp" only).
+    ok, png = cv2.imencode(".png", colour)
+    if not ok:
+        raise OSError("PNG encoding failed")
+    png_tmp = receive / (colour_name + ".tmp")
+    png_tmp.write_bytes(png.tobytes())
+    os.replace(png_tmp, receive / colour_name)
+    return colour_name
+
+
 def _flush_window(
     win: dict,
     flags: argparse.Namespace,
@@ -583,27 +629,14 @@ def _flush_window(
     os.replace(cube_tmp, receive / cube_name)
 
     # --- Baseline colour quick-look (.png) for the dashboard ---
-    colour_name = build_filename(
-        metadata_cfg, window_start, suffix="colour", extension="png"
-    )
-    colour = _convert_temp2image(
-        win["baseline_frame"],
-        temp_min_c=float(instrument_config["colourmap_min_c"])
-        if "colourmap_min_c" in instrument_config
-        else None,
-        temp_max_c=float(instrument_config["colourmap_max_c"])
-        if "colourmap_max_c" in instrument_config
-        else None,
-        decimals=irange["decimals"],
-    )
-    # Encode in memory: a "*.tmp.png" temp name would not be skipped by the
-    # file monitor (it ignores "*.tmp" only).
-    ok, png = cv2.imencode(".png", colour)
-    if not ok:
-        raise OSError("PNG encoding failed")
-    png_tmp = receive / (colour_name + ".tmp")
-    png_tmp.write_bytes(png.tobytes())
-    os.replace(png_tmp, receive / colour_name)
+    # With --png-interval-s, only for windows starting on a multiple of it.
+    colour_name = None
+    if flags.png_interval_s <= 0 or (
+        round(window_start.timestamp()) % round(flags.png_interval_s) == 0
+    ):
+        colour_name = _write_colour_png(
+            win, metadata_cfg, instrument_config, receive, irange
+        )
 
     # --- Metadata JSON (stats for every frame, kept or not) ---
     meta_name = build_filename(
@@ -621,6 +654,7 @@ def _flush_window(
         "frame_shape": list(cube.shape[1:]),
         "measuring_range": irange,
         "retention": {
+            "keep": flags.keep,
             "roi": list(flags.roi) if flags.roi else None,
             "bg_percentile": flags.bg_percentile,
             "delta_c": flags.delta_c,

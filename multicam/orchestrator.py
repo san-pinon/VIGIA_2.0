@@ -1,14 +1,26 @@
 """
 VIGIA 2.0 capture orchestrator.
 
-Runs a continuous acquisition loop on uvcam (RPi5), triggering one full
-capture cycle every ``--interval`` seconds across all instruments:
+Runs on uvcam (RPi5). The fast instruments run as their own services, each on
+round UTC multiples of its own interval:
 
-- **Local (parallel):** UV-sync + environmental on uvcam
-- **Remote (sequential):** IR → DSLR on multicam (SBC) via SSH
+- ``capture-uv-monitor.service`` (uvcam): UV cameras + spectrometer
+  (``[uv_sync] monitor_interval_s``)
+- ``capture-ir-video.service`` (multicam): Optris IR
+  (``[infrared] monitor_window_s``, one frame per window with
+  ``monitor_keep = "baseline"``)
 
-Local and remote run concurrently.  IR fires first on the remote so its
-capture is closer in time to the UV cameras.
+The orchestrator schedules the slower captures and watches the services:
+
+- each task in ``[orchestrator] schedule`` (e.g. Canon every 30 s,
+  environmental every 60 s) fires on round UTC multiples of its interval, in
+  its own thread; a task still running at its next tick skips that tick
+  (logged), it is never queued;
+- every command has a hard timeout; remote commands are also wrapped in
+  ``timeout`` on multicam, so a hung capture there cannot outlive its slot;
+- every ``supervise_interval_s`` it checks the services in ``supervise`` with
+  ``systemctl is-active`` and, with ``supervise_restart``, starts any that are
+  not running (``sudo -n``: needs passwordless sudo for systemctl).
 
 :copyright:
     2026, Santiago Pinon.
@@ -22,7 +34,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import logging.handlers
+import math
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -35,6 +50,19 @@ from multicam.utilities import read_config
 
 logger = logging.getLogger("orchestrator")
 
+DEFAULT_SCHEDULE = {"dslr": 30, "environmental": 60}
+DEFAULT_SUPERVISE = ["capture-uv-monitor.service", "multicam:capture-ir-video.service"]
+SSH_OPTIONS = [
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=10",
+    "-o",
+    "ServerAliveInterval=10",
+    "-o",
+    "ServerAliveCountMax=3",
+]
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -42,7 +70,7 @@ logger = logging.getLogger("orchestrator")
 
 
 def _setup_logging(log_path: str) -> None:
-    """Configure root logger to write to file and stderr."""
+    """Log to a rotating file (10 MB × 5) and to stderr (journald)."""
 
     log_file = Path(log_path)
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -51,8 +79,11 @@ def _setup_logging(log_path: str) -> None:
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
+    formatter.converter = time.gmtime  # log times in UTC, like the file names
 
-    file_handler = logging.FileHandler(log_file)
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file, maxBytes=10_000_000, backupCount=5
+    )
     file_handler.setFormatter(formatter)
 
     stream_handler = logging.StreamHandler(sys.stderr)
@@ -71,275 +102,267 @@ def _find_multicamctl() -> str:
     if found:
         return found
     # Fallback to the expected venv location on the RPi5
-    default = "/home/user/.venv/bin/multicamctl"
-    return default
+    return "/home/user/.venv/bin/multicamctl"
 
 
 def _run_subprocess(
-    cmd: list[str],
-    label: str,
-    results: dict,
-    dry_run: bool = False,
-) -> None:
-    """
-    Run a subprocess command, capturing stdout/stderr.
-
-    Results are stored in ``results[label]`` as a dict with keys
-    ``success``, ``returncode``, ``stdout``, ``stderr``.
-    """
+    cmd: list[str], label: str, timeout_s: float, dry_run: bool
+) -> bool:
+    """Run one command with a hard timeout; log the outcome; return success."""
 
     if dry_run:
         logger.info("[DRY RUN] %s: %s", label, " ".join(cmd))
-        results[label] = {
-            "success": True,
-            "returncode": 0,
-            "stdout": "",
-            "stderr": "",
-            "dry_run": True,
-        }
-        return
+        return True
 
+    t0 = time.monotonic()
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,  # 5-minute hard timeout per command
-        )
-        results[label] = {
-            "success": proc.returncode == 0,
-            "returncode": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
-        }
-        if proc.returncode != 0:
-            logger.error(
-                "%s failed (rc=%d): %s", label, proc.returncode, proc.stderr[:500]
-            )
-        else:
-            logger.info("%s completed successfully", label)
-            if proc.stdout.strip():
-                logger.debug("%s stdout: %s", label, proc.stdout[:500])
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
     except subprocess.TimeoutExpired:
-        logger.error("%s timed out after 300 s", label)
-        results[label] = {
-            "success": False,
-            "returncode": -1,
-            "stdout": "",
-            "stderr": "timeout",
-        }
+        logger.error("%s timed out after %.0f s", label, timeout_s)
+        return False
     except Exception as e:
         logger.error("%s error: %s", label, e)
-        results[label] = {
-            "success": False,
-            "returncode": -1,
-            "stdout": "",
-            "stderr": str(e),
-        }
+        return False
 
-
-# ---------------------------------------------------------------------------
-# Cycle execution
-# ---------------------------------------------------------------------------
-
-
-def _run_group(tasks: list[tuple[list[str], str]], dry_run: bool) -> dict:
-    """Run a list of (cmd, label) pairs in parallel and return results."""
-
-    results: dict = {}
-    threads = []
-    for cmd, label in tasks:
-        t = threading.Thread(
-            target=_run_subprocess,
-            args=(cmd, label, results, dry_run),
-            name=label,
+    elapsed = time.monotonic() - t0
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout).strip()[-500:]
+        logger.error(
+            "%s failed (rc=%d, %.1f s): %s", label, proc.returncode, elapsed, tail
         )
-        threads.append(t)
-
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    return results
+        return False
+    logger.info("%s ok (%.1f s)", label, elapsed)
+    return True
 
 
-def _run_remote_sequential(
-    tasks: list[tuple[list[str], str]],
-    dry_run: bool,
-    results: dict,
-) -> None:
-    """Run remote tasks sequentially (IR then DSLR) to avoid /dev/video conflict."""
+class Remote:
+    """Build commands for multicam over ssh."""
 
-    for cmd, label in tasks:
-        _run_subprocess(cmd, label, results, dry_run)
+    def __init__(self, user: str, host: str) -> None:
+        self.target = f"{user}@{host}"
+
+    def command(
+        self, remote_cmd: list[str], timeout_s: float | None = None
+    ) -> list[str]:
+        """``remote_cmd`` over ssh; with ``timeout_s``, killed on multicam too."""
+
+        if timeout_s is not None:
+            # SIGTERM first (lets the capture clean up), SIGKILL 5 s later.
+            remote_cmd = ["timeout", "-k", "5", f"{timeout_s:.0f}"] + remote_cmd
+        return ["ssh", *SSH_OPTIONS, self.target, *remote_cmd]
 
 
-def run_cycle(args, orch_config: dict) -> dict:
+# ---------------------------------------------------------------------------
+# Tasks
+# ---------------------------------------------------------------------------
+
+
+def build_tasks(args, orch_config: dict) -> dict[str, tuple[float, float, list[str]]]:
     """
-    Execute one full capture cycle.
+    Scheduled tasks as ``{name: (interval_s, timeout_s, command)}``.
 
-    Local group (uv-sync + environmental, parallel internally) and remote
-    group (IR → DSLR, sequential internally) run **concurrently** since they
-    are on different hardware nodes.  IR runs first on the remote so its
-    capture is closer in time to the UV cameras on uvcam.  IR and DSLR
-    remain sequential to avoid the /dev/video2 conflict (Arducam vs Optris).
+    A task's timeout is just under its interval (at most 5 min), so a hung
+    capture is stopped before it would have to skip a second tick.
     """
 
     multicamctl = _find_multicamctl()
-    host = args.multicam_host or orch_config.get("multicam_host", "192.168.30.150")
-    user = args.multicam_user or orch_config.get("multicam_user", "user")
     remote_bin = orch_config.get("remote_venv_bin", "/home/user/.venv/bin/multicamctl")
-
-    ssh_prefix = ["ssh", f"{user}@{host}"]
-
-    # --- Build local task list (run in parallel internally) ---
-    local_tasks: list[tuple[list[str], str]] = []
-
-    # capture-uv-monitor.service, when running, owns the UV cameras and the
-    # spectrometer and captures every few seconds on its own; set
-    # orchestrator.uv_per_cycle = false then so the two don't contend.
-    uv_per_cycle = orch_config.get("uv_per_cycle", True)
-    if uv_per_cycle and not args.no_uv:
-        local_tasks.append(
-            (
-                [
-                    multicamctl,
-                    "capture",
-                    "uv-sync",
-                    "--check-saturation",
-                    "--max-retries",
-                    "3",
-                ],
-                "uv-sync",
-            )
-        )
-
-    if not args.no_env:
-        local_tasks.append(
-            (
-                [multicamctl, "capture", "environmental"],
-                "environmental",
-            )
-        )
-
-    # --- Build remote task list (sequential: IR first, then DSLR) ---
-    # IR runs first so it captures closer in time to the UV cameras on uvcam.
-    remote_tasks: list[tuple[list[str], str]] = []
-
-    # The continuous capture-ir-video.service normally owns the Optris 24/7 (the
-    # SDK is single-owner), so the per-cycle IR snapshot is disabled by default —
-    # each monitor window's baseline frame is the IR snapshot. Enable
-    # orchestrator.ir_snapshot only when running without the monitor service.
-    ir_snapshot = orch_config.get("ir_snapshot", False)
-    if ir_snapshot and not args.no_ir:
-        remote_tasks.append(
-            (
-                ssh_prefix + [remote_bin, "capture", "infrared", "--check-saturation"],
-                "infrared",
-            )
-        )
-
-    if not args.no_dslr:
-        remote_tasks.append(
-            (
-                ssh_prefix
-                + [
-                    remote_bin,
-                    "capture",
-                    "dslr",
-                    "--meter-with",
-                    "picam",
-                ],
-                "dslr",
-            )
-        )
-
-    # --- Run local and remote concurrently ---
-    local_results: dict = {}
-    remote_results: dict = {}
-
-    threads = []
-
-    if local_tasks:
-        logger.info("Local group: starting %d task(s)", len(local_tasks))
-        local_thread = threading.Thread(
-            target=lambda: local_results.update(_run_group(local_tasks, args.dry_run)),
-            name="local-group",
-        )
-        threads.append(local_thread)
-
-    if remote_tasks:
-        logger.info("Remote group: starting %d task(s) (sequential)", len(remote_tasks))
-        remote_thread = threading.Thread(
-            target=_run_remote_sequential,
-            args=(remote_tasks, args.dry_run, remote_results),
-            name="remote-group",
-        )
-        threads.append(remote_thread)
-
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    return {**local_results, **remote_results}
-
-
-# ---------------------------------------------------------------------------
-# Main loop
-# ---------------------------------------------------------------------------
-
-
-def run_loop(args, orch_config: dict) -> None:
-    """Drift-corrected main loop."""
-
-    interval = args.interval or int(orch_config.get("interval_s", 60))
-    cycle = 0
-
-    logger.info(
-        "Orchestrator starting — interval=%d s, multicam=%s@%s",
-        interval,
+    remote = Remote(
         args.multicam_user or orch_config.get("multicam_user", "user"),
         args.multicam_host or orch_config.get("multicam_host", "192.168.30.150"),
     )
 
-    while True:
-        t0 = time.monotonic()
-        cycle += 1
-        cycle_ts = dt.now(UTC)
+    schedule = dict(orch_config.get("schedule", DEFAULT_SCHEDULE))
+    for name in args.skip or []:
+        schedule.pop(name, None)
 
-        logger.info("=== Cycle %d at %s ===", cycle, cycle_ts.isoformat())
+    tasks = {}
+    for name, interval in schedule.items():
+        interval = float(interval)
+        timeout_s = min(300.0, max(10.0, interval - 2.0))
+        if name == "dslr":
+            # Remote timeout a little shorter than the local one, so multicam
+            # stops the capture before ssh gives up on it.
+            cmd = remote.command(
+                [remote_bin, "capture", "dslr", "--meter-with", "picam"],
+                timeout_s=timeout_s - 3,
+            )
+        elif name == "environmental":
+            cmd = [multicamctl, "capture", "environmental"]
+        else:
+            raise ValueError(f"[orchestrator] schedule: unknown task {name!r}")
+        tasks[name] = (interval, timeout_s, cmd)
+    return tasks
 
+
+def supervise_once(
+    units: list[str], remote: Remote, restart: bool, dry_run: bool
+) -> None:
+    """Check each service; log problems; start it again if ``restart``."""
+
+    for entry in units:
+        where, _, unit = entry.rpartition(":")
+        if where not in ("", "multicam"):
+            logger.error("supervise: unknown host in %r (use 'multicam:<unit>')", entry)
+            continue
+
+        def wrap(cmd: list[str], where: str = where) -> list[str]:
+            return remote.command(cmd) if where == "multicam" else cmd
+
+        label = f"{where or 'uvcam'}:{unit}"
+        if dry_run:
+            logger.info("[DRY RUN] supervise %s", label)
+            continue
         try:
-            results = run_cycle(args, orch_config)
-        except Exception:
-            logger.exception("Cycle %d failed with unhandled exception", cycle)
-            results = {}
+            proc = subprocess.run(
+                wrap(["systemctl", "is-active", unit]),
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            state = (
+                proc.stdout.strip() or proc.stderr.strip() or f"rc={proc.returncode}"
+            )
+        except Exception as e:
+            state = f"check failed: {e}"
 
-        elapsed = time.monotonic() - t0
-        successes = sum(1 for r in results.values() if r.get("success"))
-        total = len(results)
-
-        logger.info(
-            "Cycle %d complete: %d/%d succeeded in %.1f s",
-            cycle,
-            successes,
-            total,
-            elapsed,
+        if state == "active":
+            continue
+        # Only start a unit that is plainly down; "activating" is systemd's own
+        # Restart= at work, and a failed check says nothing about the unit.
+        if not restart or state not in ("inactive", "failed"):
+            logger.warning("supervise: %s is %s", label, state)
+            continue
+        logger.warning("supervise: %s is %s — starting it", label, state)
+        _run_subprocess(
+            wrap(["sudo", "-n", "systemctl", "start", unit]),
+            f"start {label}",
+            timeout_s=60,
+            dry_run=False,
         )
 
-        sleep_s = max(0.0, interval - elapsed)
-        if sleep_s == 0:
+
+# ---------------------------------------------------------------------------
+# Scheduler
+# ---------------------------------------------------------------------------
+
+
+def _next_tick(interval_s: float, now: float) -> float:
+    """Next round UTC multiple of ``interval_s`` strictly after ``now``."""
+
+    return (math.floor(now / interval_s) + 1) * interval_s
+
+
+def run_scheduler(args, orch_config: dict) -> None:
+    """
+    Fire each task on round UTC multiples of its interval until SIGTERM/SIGINT.
+
+    A task that is still running at its next tick skips it. Supervision is one
+    more task on the same clock.
+    """
+
+    tasks = build_tasks(args, orch_config)
+    remote = Remote(
+        args.multicam_user or orch_config.get("multicam_user", "user"),
+        args.multicam_host or orch_config.get("multicam_host", "192.168.30.150"),
+    )
+    supervise = (
+        []
+        if args.no_supervise
+        else list(orch_config.get("supervise", DEFAULT_SUPERVISE))
+    )
+    supervise_restart = bool(orch_config.get("supervise_restart", True))
+    supervise_s = float(orch_config.get("supervise_interval_s", 60))
+
+    def run_task(name: str) -> None:
+        if name == "supervise":
+            supervise_once(supervise, remote, supervise_restart, args.dry_run)
+        else:
+            _, timeout_s, cmd = tasks[name]
+            _run_subprocess(cmd, name, timeout_s, args.dry_run)
+
+    intervals = {name: iv for name, (iv, _, _) in tasks.items()}
+    if supervise:
+        intervals["supervise"] = supervise_s
+
+    logger.info(
+        "Orchestrator starting — %s; supervising %s (restart=%s)",
+        ", ".join(
+            f"{n} every {iv:g} s" for n, iv in intervals.items() if n != "supervise"
+        )
+        or "no capture tasks",
+        ", ".join(supervise) or "nothing",
+        supervise_restart,
+    )
+
+    stop = threading.Event()
+
+    def _handle_stop(signum, _frame) -> None:
+        logger.info("Stop signal received — finishing running tasks")
+        stop.set()
+
+    signal.signal(signal.SIGTERM, _handle_stop)
+    signal.signal(signal.SIGINT, _handle_stop)
+
+    now = time.time()
+    next_tick = {name: _next_tick(iv, now) for name, iv in intervals.items()}
+    running: dict[str, threading.Thread] = {}
+
+    while not stop.is_set() and next_tick:
+        name = min(next_tick, key=next_tick.get)
+        if stop.wait(max(0.0, next_tick[name] - time.time())):
+            break
+        tick = next_tick[name]
+        thread = running.get(name)
+        if thread is not None and thread.is_alive():
             logger.warning(
-                "Cycle %d took %.1f s — exceeds interval (%d s), "
-                "starting next immediately",
-                cycle,
-                elapsed,
-                interval,
+                "%s still running at its %s tick — skipped",
+                name,
+                dt.fromtimestamp(tick, UTC).strftime("%H:%M:%S"),
             )
         else:
-            time.sleep(sleep_s)
+            running[name] = threading.Thread(
+                target=run_task, args=(name,), name=name, daemon=True
+            )
+            running[name].start()
+        next_tick[name] = _next_tick(intervals[name], max(time.time(), tick))
+
+    for thread in running.values():
+        thread.join(timeout=60)
+    logger.info("Orchestrator stopped")
+
+
+def run_once(args, orch_config: dict) -> bool:
+    """Run every scheduled task once, in parallel, then supervise once."""
+
+    tasks = build_tasks(args, orch_config)
+    results: dict[str, bool] = {}
+    threads = [
+        threading.Thread(
+            target=lambda n=name, t=timeout_s, c=cmd: results.__setitem__(
+                n, _run_subprocess(c, n, t, args.dry_run)
+            ),
+            name=name,
+        )
+        for name, (_, timeout_s, cmd) in tasks.items()
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if not args.no_supervise:
+        remote = Remote(
+            args.multicam_user or orch_config.get("multicam_user", "user"),
+            args.multicam_host or orch_config.get("multicam_host", "192.168.30.150"),
+        )
+        supervise_once(
+            list(orch_config.get("supervise", DEFAULT_SUPERVISE)),
+            remote,
+            restart=False,
+            dry_run=args.dry_run,
+        )
+    logger.info("Once: %d/%d tasks succeeded", sum(results.values()), len(results))
+    return all(results.values())
 
 
 # ---------------------------------------------------------------------------
@@ -351,20 +374,9 @@ def main() -> None:
     """CLI entry point for the orchestrator."""
 
     parser = argparse.ArgumentParser(
-        description="VIGIA 2.0 capture orchestrator — "
-        "coordinates multi-instrument capture cycles.",
-    )
-    parser.add_argument(
-        "--interval",
-        type=int,
-        default=None,
-        help="Capture interval in seconds (default: from config or 60)",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default=None,
-        help="Root output directory (default: from config)",
+        description="VIGIA 2.0 capture orchestrator — schedules the slow captures "
+        "(Canon, environmental) on the UTC clock and supervises the UV and IR "
+        "monitor services.",
     )
     parser.add_argument(
         "--multicam-host",
@@ -385,12 +397,20 @@ def main() -> None:
         default=str(Path.home() / ".config/multicam_config.toml"),
         help="Path to multicam_config.toml",
     )
-    parser.add_argument("--no-uv", action="store_true", help="Skip UV+spectrometer")
-    parser.add_argument("--no-ir", action="store_true", help="Skip IR captures")
-    parser.add_argument("--no-dslr", action="store_true", help="Skip DSLR captures")
-    parser.add_argument("--no-env", action="store_true", help="Skip environmental")
     parser.add_argument(
-        "--dry-run", action="store_true", help="Print commands without executing"
+        "--skip",
+        action="append",
+        metavar="TASK",
+        help="Leave out a scheduled task (dslr, environmental); repeatable",
+    )
+    parser.add_argument(
+        "--no-supervise", action="store_true", help="Don't check the services"
+    )
+    parser.add_argument(
+        "--once", action="store_true", help="Run each task once, then exit"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Log commands without executing"
     )
 
     args = parser.parse_args()
@@ -398,14 +418,11 @@ def main() -> None:
     config = read_config(Path(args.config))
     orch_config = config.get("orchestrator", {})
 
-    log_path = orch_config.get("log_path", "/home/user/logs/orchestrator.log")
-    _setup_logging(log_path)
+    _setup_logging(orch_config.get("log_path", "/home/user/logs/orchestrator.log"))
 
-    try:
-        run_loop(args, orch_config)
-    except KeyboardInterrupt:
-        logger.info("Orchestrator stopped by user (KeyboardInterrupt)")
-        sys.exit(0)
+    if args.once:
+        sys.exit(0 if run_once(args, orch_config) else 1)
+    run_scheduler(args, orch_config)
 
 
 if __name__ == "__main__":

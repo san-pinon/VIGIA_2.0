@@ -10,9 +10,9 @@ WorkingDirectory=/home/user
 # (not a TTY) and window/NUC lines only appear in bursts or on stop.
 Environment=PYTHONUNBUFFERED=1
 # Owns the Optris 24/7 (the irdirectsdk session is single-owner). Streams at
-# video_rate_hz and emits one window file set per minute; disable the
-# orchestrator's per-cycle IR snapshot (orchestrator.ir_snapshot = false) so the
-# two do not contend for the camera.
+# video_rate_hz and emits one file set per [infrared] monitor_window_s (10 s,
+# one frame each with monitor_keep = "baseline"). vigia-orchestrator.service on
+# uvcam checks it over ssh and starts it if it is down.
 ExecStart=/home/user/.venv/bin/multicamctl capture infrared-video --monitor
 Restart=always
 RestartSec=5
