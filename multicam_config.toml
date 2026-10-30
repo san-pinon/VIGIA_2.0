@@ -268,6 +268,9 @@ calibration_stops    = 0.0    # tune in field: negative if Canon overexposes, po
 
 [orchestrator]
 schedule        = { dslr = 30, environmental = 60 }   # seconds, aligned to the UTC clock
+night_schedule  = { dslr = 120 }   # slower while the sun is below night_sun_elevation_deg
+                                   # (a multiple of the day interval; site = [uv_sync] lat/lon)
+night_sun_elevation_deg = 3
 supervise       = ["capture-uv-monitor.service", "multicam:capture-ir-video.service"]
 supervise_interval_s = 60
 supervise_restart    = true   # start a supervised unit that is inactive/failed (sudo -n)

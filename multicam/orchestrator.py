@@ -16,6 +16,9 @@ The orchestrator schedules the slower captures and watches the services:
   environmental every 60 s) fires on round UTC multiples of its interval, in
   its own thread; a task still running at its next tick skips that tick
   (logged), it is never queued;
+- a task in ``night_schedule`` (e.g. Canon every 120 s) uses that slower
+  interval while the sun is below ``night_sun_elevation_deg`` at the site
+  (``[uv_sync] latitude/longitude``); it must be a multiple of the day one;
 - every command has a hard timeout; remote commands are also wrapped in
   ``timeout`` on multicam, so a hung capture there cannot outlive its slot;
 - every ``supervise_interval_s`` it checks the services in ``supervise`` with
@@ -47,10 +50,12 @@ from datetime import datetime as dt
 from pathlib import Path
 
 from multicam.utilities import read_config
+from multicam.utilities.sun import solar_elevation_deg
 
 logger = logging.getLogger("orchestrator")
 
 DEFAULT_SCHEDULE = {"dslr": 30, "environmental": 60}
+DEFAULT_NIGHT_SUN_ELEVATION_DEG = 3.0
 DEFAULT_SUPERVISE = ["capture-uv-monitor.service", "multicam:capture-ir-video.service"]
 SSH_OPTIONS = [
     "-o",
@@ -184,7 +189,8 @@ def build_tasks(args, orch_config: dict) -> dict[str, tuple[float, float, list[s
             # Remote timeout a little shorter than the local one, so multicam
             # stops the capture before ssh gives up on it.
             cmd = remote.command(
-                [remote_bin, "capture", "dslr", "--meter-with", "picam"],
+                # Closed loop: the previous Canon shot sets this one's exposure.
+                [remote_bin, "capture", "dslr", "--meter-with", "previous"],
                 timeout_s=timeout_s - 3,
             )
         elif name == "environmental":
@@ -253,12 +259,43 @@ def _next_tick(interval_s: float, now: float) -> float:
     return (math.floor(now / interval_s) + 1) * interval_s
 
 
-def run_scheduler(args, orch_config: dict) -> None:
+def _night_schedule(
+    orch_config: dict,
+    intervals: dict[str, float],
+    site: tuple[float, float] | None,
+) -> dict[str, float]:
+    """``{task: night interval}`` for scheduled tasks, validated; {} if unusable."""
+
+    night = {
+        name: float(iv)
+        for name, iv in orch_config.get("night_schedule", {}).items()
+        if name in intervals
+    }
+    if not night:
+        return {}
+    if site is None:
+        logger.warning(
+            "night_schedule ignored: no site coordinates ([uv_sync] latitude/longitude)"
+        )
+        return {}
+    for name, iv in night.items():
+        if iv <= 0 or round(iv) % round(intervals[name]) != 0:
+            raise ValueError(
+                f"[orchestrator] night_schedule: {name} = {iv:g} s must be a "
+                f"multiple of its day interval ({intervals[name]:g} s)"
+            )
+    return night
+
+
+def run_scheduler(
+    args, orch_config: dict, site: tuple[float, float] | None = None
+) -> None:
     """
     Fire each task on round UTC multiples of its interval until SIGTERM/SIGINT.
 
     A task that is still running at its next tick skips it. Supervision is one
-    more task on the same clock.
+    more task on the same clock. Tasks in ``night_schedule`` skip the ticks that
+    are not on their night interval while the sun is below the threshold.
     """
 
     tasks = build_tasks(args, orch_config)
@@ -282,6 +319,11 @@ def run_scheduler(args, orch_config: dict) -> None:
             _run_subprocess(cmd, name, timeout_s, args.dry_run)
 
     intervals = {name: iv for name, (iv, _, _) in tasks.items()}
+    night = _night_schedule(orch_config, intervals, site)
+    night_elevation = float(
+        orch_config.get("night_sun_elevation_deg", DEFAULT_NIGHT_SUN_ELEVATION_DEG)
+    )
+    is_night: dict[str, bool] = {}
     if supervise:
         intervals["supervise"] = supervise_s
 
@@ -294,6 +336,12 @@ def run_scheduler(args, orch_config: dict) -> None:
         ", ".join(supervise) or "nothing",
         supervise_restart,
     )
+    if night:
+        logger.info(
+            "Night (sun < %g°): %s",
+            night_elevation,
+            ", ".join(f"{n} every {iv:g} s" for n, iv in night.items()),
+        )
 
     stop = threading.Event()
 
@@ -313,8 +361,23 @@ def run_scheduler(args, orch_config: dict) -> None:
         if stop.wait(max(0.0, next_tick[name] - time.time())):
             break
         tick = next_tick[name]
+        skip_for_night = False
+        if name in night:
+            elevation = solar_elevation_deg(dt.fromtimestamp(tick, UTC), *site)
+            now_night = elevation < night_elevation
+            if is_night.get(name) != now_night:
+                logger.info(
+                    "%s: sun at %.1f° — every %g s",
+                    name,
+                    elevation,
+                    night[name] if now_night else intervals[name],
+                )
+                is_night[name] = now_night
+            skip_for_night = now_night and round(tick) % round(night[name]) != 0
         thread = running.get(name)
-        if thread is not None and thread.is_alive():
+        if skip_for_night:
+            pass
+        elif thread is not None and thread.is_alive():
             logger.warning(
                 "%s still running at its %s tick — skipped",
                 name,
@@ -417,12 +480,18 @@ def main() -> None:
 
     config = read_config(Path(args.config))
     orch_config = config.get("orchestrator", {})
+    uv_sync = config.get("uv_sync", {})
+    site = (
+        (float(uv_sync["latitude"]), float(uv_sync["longitude"]))
+        if "latitude" in uv_sync and "longitude" in uv_sync
+        else None
+    )
 
     _setup_logging(orch_config.get("log_path", "/home/user/logs/orchestrator.log"))
 
     if args.once:
         sys.exit(0 if run_once(args, orch_config) else 1)
-    run_scheduler(args, orch_config)
+    run_scheduler(args, orch_config, site)
 
 
 if __name__ == "__main__":
