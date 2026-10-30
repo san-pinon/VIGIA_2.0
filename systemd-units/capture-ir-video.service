@@ -1,6 +1,6 @@
 [Unit]
 Description=VIGIA 2.0 — continuous IR monitor (Optris Pi 640, radiometric)
-After=network.target
+After=network.target chrony.service
 
 [Service]
 User=user
@@ -13,11 +13,18 @@ Environment=PYTHONUNBUFFERED=1
 # video_rate_hz and emits one file set per [infrared] monitor_window_s (10 s,
 # one frame each with monitor_keep = "baseline"). vigia-orchestrator.service on
 # uvcam checks it over ssh and starts it if it is down.
+# Wait (up to ~30 s) for chrony to sync so file names/timestamps are right;
+# the leading "-" starts anyway if it never syncs (multicam follows uvcam;
+# its CMOS RTC still gives a close time). Kept under the
+# orchestrator's 60 s timeout on "systemctl start" (it blocks through
+# ExecStartPre). Re-runs on every automatic restart.
+ExecStartPre=-/usr/bin/chronyc waitsync 3 0.5
 ExecStart=/home/user/.venv/bin/multicamctl capture infrared-video --monitor
 Restart=always
 RestartSec=5
 # SIGTERM lets the driver flush the in-progress window before exiting.
 KillSignal=SIGTERM
+TimeoutStartSec=60
 TimeoutStopSec=30
 
 [Install]
