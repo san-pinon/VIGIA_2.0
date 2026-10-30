@@ -276,7 +276,10 @@ def monitor_for_files(config_path: pathlib.Path | None = None) -> None:
     print("File monitor running — waiting for new files...\n")
 
     last_rescan = time.monotonic()
-    for event in notifier.event_gen(yield_nones=True, timeout_s=1):
+    # No ``timeout_s``: with it, event_gen *ends* after that many quiet seconds
+    # and the daemon exits. Without it, a None arrives every ~1 s (epoll block)
+    # and the loop runs forever.
+    for event in notifier.event_gen(yield_nones=True):
         if time.monotonic() - last_rescan > RESCAN_INTERVAL_S:
             _rescan()
             last_rescan = time.monotonic()
