@@ -14,8 +14,10 @@ the Canon EOS 4000D with computed ISO and shutter settings.
 
 import argparse
 import json
+import os
 import pathlib
 import sys
+import time
 from datetime import UTC
 from datetime import datetime as dt
 
@@ -43,6 +45,29 @@ def _check_canon_saturation(image: np.ndarray, target: float = 0.9) -> bool:
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY) if image.ndim == 3 else image
     p95 = float(np.percentile(gray, 95))
     return p95 > (255 * target)
+
+
+def _atomic_write(path: pathlib.Path, data: bytes) -> None:
+    """
+    Write via a hidden temp name then ``os.replace`` into place, so the file
+    monitor only sees complete files and a kill mid-write (orchestrator
+    timeout) leaves no partial file in ``receive/``.
+    """
+
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
+def _encode(
+    image: np.ndarray, extension: str, params: list[int] | None = None
+) -> bytes:
+    """Encode an image in memory; raise CaptureFailure instead of saving nothing."""
+
+    ok, buf = cv2.imencode(extension, image, params or [])
+    if not ok:
+        raise CaptureFailure(f"Encoding {extension} image failed")
+    return buf.tobytes()
 
 
 def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
@@ -131,21 +156,29 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
 
     # --- Canon capture (with optional saturation retry) ---
     print("Firing Canon DSLR...")
-    canon = CanonCamera(vis_config)
+    canon = None
     canon_image = None
     retries = 0
 
     try:
         for attempt in range(flags.max_retries + 1):
             try:
+                if canon is None:
+                    canon = CanonCamera(vis_config)
                 result = capture_canon(
                     canon,
                     settings={"iso": iso, "shutterspeed": shutter_str},
                 )
-            except CaptureFailure as e:
+            except (CaptureFailure, RuntimeError) as e:
+                # RuntimeError = CanonCamera() could not open the camera.
                 print(f"   Canon capture failed: {e}")
+                # A failed gphoto2 session usually stays broken: reconnect.
+                if canon is not None:
+                    canon.shutdown()
+                    canon = None
                 if attempt < flags.max_retries:
                     retries += 1
+                    time.sleep(2.0)
                     continue
                 raise
 
@@ -163,13 +196,21 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
             break
 
     finally:
-        canon.shutdown()
+        if canon is not None:
+            canon.shutdown()
 
     # --- Save Canon image ---
     canon_fname = build_filename(
         metadata_cfg, timestamp, suffix="canon", extension="jpg"
     )
-    cv2.imwrite(str(canon_archive / "receive" / canon_fname), cv2.cvtColor(canon_image, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 90])
+    _atomic_write(
+        canon_archive / "receive" / canon_fname,
+        _encode(
+            cv2.cvtColor(canon_image, cv2.COLOR_RGB2BGR),
+            ".jpg",
+            [cv2.IMWRITE_JPEG_QUALITY, 90],
+        ),
+    )
     print(f"   Saved Canon image: {canon_fname}")
 
     # --- Save last picam frame ---
@@ -178,7 +219,9 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
         picam_fname = build_filename(
             metadata_cfg, timestamp, suffix="meter", extension="png"
         )
-        cv2.imwrite(str(picam_archive / "receive" / picam_fname), last_picam_frame)
+        _atomic_write(
+            picam_archive / "receive" / picam_fname, _encode(last_picam_frame, ".png")
+        )
         print(f"   Saved picam frame: {picam_fname}")
 
     # --- Compute metering p95 for metadata ---
@@ -207,8 +250,9 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
             "picam_image": picam_fname,
         },
     }
-    (canon_archive / "receive" / meta_fname).write_text(
-        json.dumps(meta_payload, indent=2)
+    _atomic_write(
+        canon_archive / "receive" / meta_fname,
+        json.dumps(meta_payload, indent=2).encode(),
     )
 
     summary = {

@@ -150,11 +150,16 @@ def capture(camera: Camera, settings: dict | None = None) -> CaptureResult:
     # The infrared capture (sequential predecessor) can leave USB I/O in
     # progress on a shared bus, causing gphoto2 error -110 on set_config or
     # trigger_capture. Draining first clears that state.
+    # A dropped camera fails here first, so report it as a CaptureFailure
+    # (the caller's retry then reconnects).
     drain_deadline = time.monotonic() + 2.0
-    while time.monotonic() < drain_deadline:
-        event_type, _ = camera.camera.wait_for_event(100)
-        if event_type == gp.GP_EVENT_TIMEOUT:
-            break
+    try:
+        while time.monotonic() < drain_deadline:
+            event_type, _ = camera.camera.wait_for_event(100)
+            if event_type == gp.GP_EVENT_TIMEOUT:
+                break
+    except gp.GPhoto2Error as e:
+        raise CaptureFailure(f"Canon event drain failed: {e}") from e
 
     # --- Apply camera settings (one round-trip for all widgets) ---
     widget_map = {"iso": "iso", "shutterspeed": "shutterspeed", "aperture": "aperture"}
@@ -184,13 +189,16 @@ def capture(camera: Camera, settings: dict | None = None) -> CaptureResult:
     # --- Wait for file-added event (max 30 s) ---
     file_path = None
     deadline = time.monotonic() + 30.0
-    while time.monotonic() < deadline:
-        event_type, event_data = camera.camera.wait_for_event(1000)  # ms
-        if event_type == gp.GP_EVENT_FILE_ADDED:
-            file_path = event_data
-            break
-        if event_type == gp.GP_EVENT_CAPTURE_COMPLETE:
-            continue  # keep waiting for the file
+    try:
+        while time.monotonic() < deadline:
+            event_type, event_data = camera.camera.wait_for_event(1000)  # ms
+            if event_type == gp.GP_EVENT_FILE_ADDED:
+                file_path = event_data
+                break
+            if event_type == gp.GP_EVENT_CAPTURE_COMPLETE:
+                continue  # keep waiting for the file
+    except gp.GPhoto2Error as e:
+        raise CaptureFailure(f"Canon wait for file failed: {e}") from e
 
     if file_path is None:
         raise CaptureFailure("Timed out waiting for Canon file-added event.")
