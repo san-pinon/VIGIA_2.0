@@ -226,6 +226,8 @@ monitor_spec_budget_s = 4     # Monitor: max time per spectrum, (stack + 1 burn-
                               # fewer spectra co-added as integration grows, integration ≤ half of this
 quicklook_interval_s  = 60    # Monitor: PNG previews only on the tick at each multiple of this (s)
 min_sun_elevation_deg = 5     # Devices closed while the sun is below this
+monitor_max_reopens   = 5     # Monitor: exit (code 1, systemd restarts it) after this many failed
+                              # opens/reopens with no good capture in between; 0 = never
 # Camera site for the daylight gate (decimal degrees, north/east positive).
 # Without them the monitor captures day and night.
 latitude  = 19.067043     # UV camera site, ~4000 m a.s.l.

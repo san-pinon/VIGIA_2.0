@@ -97,6 +97,9 @@ DEFAULT_MONITOR_INTERVAL_S = 5.0
 # Monitor: time allowed for one spectrum, (stack + 1 burn-in) × integration.
 DEFAULT_MONITOR_SPEC_BUDGET_S = 4.0
 DEFAULT_MIN_SUN_ELEVATION_DEG = 5.0
+# Monitor: exit (non-zero) after this many device problems in a row (failed
+# opens + forced reopens) with no good capture between them; 0 = never.
+DEFAULT_MONITOR_MAX_REOPENS = 5
 
 
 def _next_uv_exposure(
@@ -735,6 +738,9 @@ def _run_monitor(session: _UVSession, flags: argparse.Namespace) -> None:
             f"{interval:g} s — captures with the spectrometer will overrun"
         )
     session.set_spec_budget(spec_budget_s)
+    max_reopens = int(
+        session.sync_config.get("monitor_max_reopens", DEFAULT_MONITOR_MAX_REOPENS)
+    )
 
     lat = session.sync_config.get("latitude")
     lon = session.sync_config.get("longitude")
@@ -771,6 +777,23 @@ def _run_monitor(session: _UVSession, flags: argparse.Namespace) -> None:
 
     failures = 0
     night = False
+    # Device problems since the last good capture. Past max_reopens the process
+    # exits non-zero: systemd restarts it (fresh libcamera/seabreeze state), the
+    # restart count and journal show it, and the orchestrator logs it.
+    reopens = 0
+    gave_up = False
+
+    def _give_up() -> bool:
+        nonlocal reopens, gave_up
+        reopens += 1
+        if max_reopens and reopens >= max_reopens:
+            print(
+                f"   ERROR: {reopens} device problems (failed opens/reopens) with "
+                "no good capture — exiting so systemd restarts the service"
+            )
+            gave_up = True
+        return gave_up
+
     try:
         while not stop["flag"]:
             tick_epoch = (math.floor(time.time() / interval) + 1) * interval
@@ -804,7 +827,10 @@ def _run_monitor(session: _UVSession, flags: argparse.Namespace) -> None:
                 try:
                     session.open()
                 except Exception as e:
-                    print(f"   ERROR opening devices: {e} — retrying in 30 s")
+                    print(f"   ERROR opening devices: {e}")
+                    if _give_up():
+                        break
+                    print("   ...retrying in 30 s")
                     for _ in range(60):
                         if stop["flag"]:
                             break
@@ -822,8 +848,11 @@ def _run_monitor(session: _UVSession, flags: argparse.Namespace) -> None:
                     print("   ...3 failures in a row — reopening devices")
                     session.close()
                     failures = 0
+                    if _give_up():
+                        break
                 continue
             failures = 0
+            reopens = 0
             completed = dt.now(UTC)
 
             session.adjust(uv1, uv2, spec, settle=False, verbose=False)
@@ -868,3 +897,5 @@ def _run_monitor(session: _UVSession, flags: argparse.Namespace) -> None:
     finally:
         session.close()
         print("...UV monitor stopped.")
+    if gave_up:
+        sys.exit(1)
