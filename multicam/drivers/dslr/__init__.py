@@ -1,8 +1,13 @@
 """
-DSLR capture with optional picam-based metering.
+DSLR capture: fire the Canon EOS 4000D with metered or manual settings.
 
-Uses the Arducam (picam) on the SBC to meter the scene and then fires
-the Canon EOS 4000D with computed ISO and shutter settings.
+Metering (``--meter-with``):
+
+- ``previous`` (orchestrator): closed loop — the previous Canon shot's
+  brightness sets this shot's exposure; state in ``.canon_state.json``.
+- ``picam`` / ``arducam``: meter with the Arducam first (unreliable in dim
+  light, kept for manual use).
+- none, or ``--iso`` + ``--shutter``: fixed settings.
 
 :copyright:
     2026, Santiago Pinon.
@@ -20,6 +25,7 @@ import sys
 import time
 from datetime import UTC
 from datetime import datetime as dt
+from fractions import Fraction
 
 import cv2
 import numpy as np
@@ -32,19 +38,31 @@ from multicam.utilities.naming import build_filename
 
 from .metering import (
     EOS_ISO_VALUES,
+    SHUTTER_MIN,
     _clamp_shutter,
     _parse_shutter,
     _quantize_shutter,
+    exposure_stops,
+    image_p95,
     meter_scene,
+    next_stops,
+    settings_for_stops,
 )
 
+# A Canon image whose p95 is above this fraction of 255 counts as saturated.
+SATURATION_FRACTION = 0.9
 
-def _check_canon_saturation(image: np.ndarray, target: float = 0.9) -> bool:
-    """Return True if the Canon image 95th percentile exceeds target fraction of 255."""
 
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY) if image.ndim == 3 else image
-    p95 = float(np.percentile(gray, 95))
-    return p95 > (255 * target)
+def _read_state(path: pathlib.Path, max_age_s: float) -> dict | None:
+    """The closed-loop state, or None if missing, unreadable or too old."""
+
+    try:
+        state = json.loads(path.read_text())
+        age_s = (dt.now(UTC) - dt.fromisoformat(state["updated_utc"])).total_seconds()
+        float(state["next_stops"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return state if 0 <= age_s <= max_age_s else None
 
 
 def _atomic_write(path: pathlib.Path, data: bytes) -> None:
@@ -85,7 +103,7 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
 
     flag_parser = argparse.ArgumentParser(add_help=False)
     flag_parser.add_argument(
-        "--meter-with", type=str, default=None, choices=["picam", "arducam"]
+        "--meter-with", type=str, default=None, choices=["previous", "picam", "arducam"]
     )
     flag_parser.add_argument("--iso", type=int, default=None)
     flag_parser.add_argument("--shutter", type=str, default=None)
@@ -115,18 +133,54 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
     canon_cfg = vis_config.get("canon", {})
     default_iso = flags.iso or canon_cfg.get("iso", 800)
     default_shutter = flags.shutter or canon_cfg.get("shutterspeed", "1/250")
-    target_p95 = int(dslr_config.get("target_p95", 204))
+    target_p95 = int(dslr_config.get("target_p95", 180))
     max_meter = int(dslr_config.get("max_meter_iterations", 5))
-    tolerance = float(dslr_config.get("tolerance_pct", 10)) / 100.0
     calibration_stops = float(dslr_config.get("calibration_stops", 0.0))
+    # Closed-loop exposure policy (see metering.settings_for_stops).
+    blur_limit_s = float(dslr_config.get("blur_limit_s", 1.0))
+    max_iso = int(dslr_config.get("max_iso", 6400))
+    max_shutter_s = float(dslr_config.get("max_shutter_s", 15.0))
+    state_path = pathlib.Path(
+        dslr_config.get("state_file") or (canon_archive / ".canon_state.json")
+    )
+    state_max_age_s = float(dslr_config.get("state_max_age_s", 1800))
 
     iso = default_iso
     shutter_str = default_shutter
     last_picam_frame = None
     metering_iterations = 0
+    manual = bool(flags.iso and flags.shutter)
+    closed_loop = flags.meter_with == "previous" and not manual
+    metering = "previous" if closed_loop else (flags.meter_with or "fixed")
+    if manual:
+        metering = "manual"
+    # Achievable range, so the state can't drift past what the camera can do
+    # (e.g. all night at the longest exposure, then hours to come back).
+    min_stops = exposure_stops(EOS_ISO_VALUES[0], str(SHUTTER_MIN))
+    max_stops = exposure_stops(
+        max_iso, _quantize_shutter(_clamp_shutter(Fraction(max_shutter_s)))
+    )
+
+    # --- Closed loop: settings from the previous Canon shot ---
+    if closed_loop:
+        state = _read_state(state_path, state_max_age_s)
+        if state is not None:
+            stops = float(state["next_stops"])
+            source = "previous shot"
+        else:
+            stops = exposure_stops(default_iso, default_shutter)
+            source = "config (no recent state)"
+        stops = max(min_stops, min(max_stops, stops))
+        iso, shutter_str = settings_for_stops(
+            stops, blur_limit_s, max_iso, max_shutter_s
+        )
+        print(
+            f"Closed-loop exposure from {source}: {stops:+.2f} stops → "
+            f"ISO={iso} shutter={shutter_str}"
+        )
 
     # --- Metering with picam ---
-    if flags.meter_with and not (flags.iso and flags.shutter):
+    elif flags.meter_with and not manual:
         print("Metering scene with picam...")
         picam = V4L2Camera(vis_config)
         try:
@@ -159,6 +213,10 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
     canon = None
     canon_image = None
     retries = 0
+    saturation_retries = 0
+    # Closed loop: one re-shot at most; the next scheduled shot corrects the
+    # rest. Each re-shot costs ~7 s and the orchestrator's timeout is ~25 s.
+    max_saturation_retries = 1 if closed_loop else flags.max_retries
 
     try:
         for attempt in range(flags.max_retries + 1):
@@ -185,19 +243,68 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
             canon_image = result.artifacts["image"]
             timestamp = dt.now(UTC)
 
-            if flags.check_saturation and _check_canon_saturation(canon_image):
-                print(f"   Canon image saturated (attempt {attempt + 1})")
-                if attempt < flags.max_retries:
+            canon_p95 = image_p95(canon_image)
+            saturated = canon_p95 > 255 * SATURATION_FRACTION
+            if flags.check_saturation and saturated:
+                print(
+                    f"   Canon image saturated (p95={canon_p95:.0f}, "
+                    f"attempt {attempt + 1})"
+                )
+                if (
+                    attempt < flags.max_retries
+                    and saturation_retries < max_saturation_retries
+                ):
                     retries += 1
-                    current = _parse_shutter(shutter_str)
-                    new_shutter = _clamp_shutter(current * 1 / 2)
-                    shutter_str = _quantize_shutter(new_shutter)
+                    saturation_retries += 1
+                    if closed_loop:
+                        stops = max(
+                            min_stops,
+                            next_stops(
+                                exposure_stops(iso, shutter_str), canon_p95, target_p95
+                            ),
+                        )
+                        iso, shutter_str = settings_for_stops(
+                            stops, blur_limit_s, max_iso, max_shutter_s
+                        )
+                    else:
+                        current = _parse_shutter(shutter_str)
+                        new_shutter = _clamp_shutter(current * 1 / 2)
+                        shutter_str = _quantize_shutter(new_shutter)
                     continue
             break
 
     finally:
         if canon is not None:
             canon.shutdown()
+
+    # --- Closed loop: exposure for the next shot ---
+    shot_stops = exposure_stops(iso, shutter_str)
+    following_stops = None
+    if closed_loop:
+        following_stops = max(
+            min_stops, min(max_stops, next_stops(shot_stops, canon_p95, target_p95))
+        )
+        try:
+            _atomic_write(
+                state_path,
+                json.dumps(
+                    {
+                        "next_stops": round(following_stops, 3),
+                        "last_stops": round(shot_stops, 3),
+                        "last_p95": round(canon_p95, 1),
+                        "last_iso": iso,
+                        "last_shutterspeed": shutter_str,
+                        "updated_utc": timestamp.isoformat(),
+                    },
+                    indent=2,
+                ).encode(),
+            )
+        except OSError as e:
+            print(f"   WARNING: could not write {state_path}: {e}")
+        print(
+            f"   Canon p95={canon_p95:.0f} (target {target_p95}) → next shot "
+            f"{following_stops:+.2f} stops"
+        )
 
     # --- Save Canon image ---
     canon_fname = build_filename(
@@ -242,7 +349,14 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
         "timestamp_utc": timestamp.isoformat(),
         "iso": iso,
         "shutterspeed": shutter_str,
+        "metering": metering,
         "metering_iterations": metering_iterations,
+        "canon_p95": round(canon_p95, 1),
+        "saturated": saturated,
+        "exposure_stops": round(shot_stops, 3),
+        "next_exposure_stops": (
+            round(following_stops, 3) if following_stops is not None else None
+        ),
         "picam_p95": picam_p95,
         "saturation_retries": retries,
         "files": {

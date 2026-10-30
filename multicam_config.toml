@@ -243,8 +243,18 @@ longitude = -98.628232
 [dslr]
 output_dir           = "/home/user/data/dslr/"
 picam_output_dir     = "/home/user/data/picam/"
+target_p95           = 180    # Canon JPEG 95th-percentile grey level to aim for (of 255)
+# Closed loop (`--meter-with previous`, what the orchestrator uses): each shot's p95 sets
+# the next shot's exposure; state in output_dir/.canon_state.json (ignored when older than
+# state_max_age_s → starts again from [visible.canon] iso/shutterspeed).
+# Policy: ISO 100 up to blur_limit_s, then ISO up to max_iso, then shutter up to max_shutter_s
+# (exposure + download must fit the orchestrator's ~25 s Canon timeout).
+blur_limit_s         = 1.0
+max_iso              = 6400
+max_shutter_s        = 15
+state_max_age_s      = 1800
+# Arducam metering (`--meter-with picam`, manual use only):
 max_meter_iterations = 8
-target_p95           = 128    # 50% of 255 — EV metering target brightness
 calibration_stops    = 0.0    # tune in field: negative if Canon overexposes, positive if underexposes
 
 # ---------------------------------------------------------------------------

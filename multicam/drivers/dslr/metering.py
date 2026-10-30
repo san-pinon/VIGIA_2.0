@@ -1,12 +1,17 @@
 """
-EV-based metering for Canon DSLR capture using the Arducam (V4L2).
+Exposure control for the Canon DSLR.
 
-The Arducam is switched to manual exposure; a binary search finds the
-integration time that reaches a target brightness.  That settled exposure
-represents scene luminance (L ∝ pixel_value / exposure_time), which is
-then converted to Canon ISO + shutter via a one-time calibration offset.
+Two ways to pick ISO + shutter:
 
-Works from full sunlight to full darkness without change.
+- **Closed loop** (``--meter-with previous``, used by the orchestrator): the
+  brightness of the previous Canon shot sets the next one (``next_stops``,
+  ``settings_for_stops``), like the UV monitor. Works day and night.
+- **Arducam EV metering** (``--meter-with picam``, ``meter_scene`` below):
+
+  the Arducam is switched to manual exposure; a binary search finds the
+  integration time that reaches a target brightness, converted to Canon
+  ISO + shutter via a one-time calibration offset. Kept for manual use: the
+  Arducam honours only a few ms of manual exposure, so it fails in dim light.
 
 :copyright:
     2026, Santiago Pinon.
@@ -19,6 +24,7 @@ Works from full sunlight to full darkness without change.
 from __future__ import annotations
 
 import logging
+import math
 import subprocess
 import time
 from fractions import Fraction
@@ -51,8 +57,13 @@ _EXP_MAX = 5000   # 500 ms
 
 
 def _quantize_shutter(shutter: Fraction) -> str:
-    target = float(shutter)
-    idx = min(range(len(_EOS_SHUTTER_FLOATS)), key=lambda i: abs(_EOS_SHUTTER_FLOATS[i] - target))
+    """Nearest EOS shutter string, by ratio (so 1/3000 → 1/3200, not 1/4000)."""
+
+    target = max(float(shutter), 1e-6)
+    idx = min(
+        range(len(_EOS_SHUTTER_FLOATS)),
+        key=lambda i: abs(math.log(_EOS_SHUTTER_FLOATS[i] / target)),
+    )
     return EOS_SHUTTER_STRINGS[idx]
 
 
@@ -217,3 +228,73 @@ def meter_scene(
     )
 
     return iso, shutter_str, last_frame
+
+
+# ---------------------------------------------------------------------------
+# Closed loop: meter from the previous Canon shot
+# ---------------------------------------------------------------------------
+
+# p95 at or above this (8-bit) is treated as clipped: the true level is unknown.
+CLIPPED_P95 = 250
+# JPEG values are gamma-encoded; linear light ≈ (value / 255) ** JPEG_GAMMA.
+JPEG_GAMMA = 2.2
+# Changes smaller than this (stops) are ignored, so settings don't hunt.
+DEADBAND_STOPS = 0.33
+# Largest correction per shot (stops); clipped shots step down by CLIPPED_STEP.
+MAX_STEP_UP = 4.0
+MAX_STEP_DOWN = 3.0
+CLIPPED_STEP = 3.0
+
+
+def image_p95(image: np.ndarray) -> float:
+    """95th-percentile grey level of an RGB (or grey) uint8 image, subsampled."""
+
+    small = image[::4, ::4]
+    gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY) if small.ndim == 3 else small
+    return float(np.percentile(gray, 95))
+
+
+def exposure_stops(iso: int, shutter_str: str) -> float:
+    """Light gathered, in stops relative to 1 s at ISO 100 (aperture fixed)."""
+
+    return math.log2(float(_parse_shutter(shutter_str)) * iso / 100.0)
+
+
+def settings_for_stops(
+    stops: float, blur_limit_s: float, max_iso: int, max_shutter_s: float
+) -> tuple[int, str]:
+    """
+    ISO + shutter for an exposure of ``stops`` (see ``exposure_stops``).
+
+    Policy: ISO 100 while the shutter stays ≤ ``blur_limit_s``; then the lowest
+    ISO (up to ``max_iso``) that keeps the shutter there; then the shutter grows
+    up to ``max_shutter_s``. Beyond that the shot is simply darker.
+    """
+
+    t100 = 2.0**stops  # shutter needed at ISO 100
+    iso = EOS_ISO_VALUES[0]
+    if t100 > blur_limit_s:
+        allowed = [i for i in EOS_ISO_VALUES if i <= max_iso] or [EOS_ISO_VALUES[0]]
+        iso = next(
+            (i for i in allowed if t100 * 100.0 / i <= blur_limit_s), allowed[-1]
+        )
+    shutter = t100 * 100.0 / iso
+    shutter = max(float(SHUTTER_MIN), min(max_shutter_s, shutter))
+    return iso, _quantize_shutter(Fraction(shutter).limit_denominator(10000))
+
+
+def next_stops(stops: float, p95: float, target_p95: float) -> float:
+    """
+    Exposure (stops) for the next shot, from this shot's exposure and p95.
+
+    Unclipped: scale by the linear-light ratio (undoing the JPEG gamma),
+    limited to MAX_STEP_UP / MAX_STEP_DOWN per shot, with a dead band.
+    Clipped: step down CLIPPED_STEP stops, since the true level is unknown.
+    """
+
+    if p95 >= CLIPPED_P95:
+        return stops - CLIPPED_STEP
+    delta = JPEG_GAMMA * math.log2(target_p95 / max(p95, 1.0))
+    if abs(delta) < DEADBAND_STOPS:
+        return stops
+    return stops + max(-MAX_STEP_DOWN, min(MAX_STEP_UP, delta))
