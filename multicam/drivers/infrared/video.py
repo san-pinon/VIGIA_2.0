@@ -38,6 +38,7 @@ from datetime import datetime as dt
 import cv2
 import numpy as np
 
+from multicam.utilities import watchdog
 from multicam.utilities.files import atomic_write, atomic_write_bytes, atomic_write_text
 from multicam.utilities.naming import build_filename
 
@@ -426,6 +427,10 @@ def _run_monitor(
     pending_nucs = [initial_nuc]
 
     while not stop["flag"]:
+        # Stops if the SDK hangs (e.g. Optris unplugged): systemd then kills and
+        # restarts the service (WatchdogSec in capture-ir-video.service).
+        watchdog.ping()
+
         if flags.duration_s > 0 and time.monotonic() - run_start >= flags.duration_s:
             break
 

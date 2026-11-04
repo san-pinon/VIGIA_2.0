@@ -19,6 +19,13 @@ Environment=PYTHONUNBUFFERED=1
 # orchestrator's 60 s timeout on "systemctl start" (it blocks through
 # ExecStartPre). Re-runs on every automatic restart.
 ExecStartPre=-/usr/bin/chronyc waitsync 3 0.5
+# The capture loop pings systemd every frame. If the Optris SDK hangs (it does when
+# the camera is unplugged: no error, the unit stays active), restart the service.
+# SIGKILL because the blocked process can't act on SIGTERM. The first ping has to
+# arrive within this time too, which covers camera start-up + the first NUC.
+NotifyAccess=main
+WatchdogSec=60
+WatchdogSignal=SIGKILL
 ExecStart=/home/user/.venv/bin/multicamctl capture infrared-video --monitor
 Restart=always
 RestartSec=5
