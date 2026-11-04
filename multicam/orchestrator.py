@@ -23,7 +23,10 @@ The orchestrator schedules the slower captures and watches the services:
   ``timeout`` on multicam, so a hung capture there cannot outlive its slot;
 - every ``supervise_interval_s`` it checks the services in ``supervise`` with
   ``systemctl is-active`` and, with ``supervise_restart``, starts any that are
-  not running (``sudo -n``: needs passwordless sudo for systemctl).
+  not running (``sudo -n``: needs passwordless sudo for systemctl);
+- at the same time it warns about any instrument in ``freshness_max_age_min``
+  with no new file for that long, whatever the cause: a service can be
+  ``active`` and still be producing nothing. This only logs.
 
 :copyright:
     2026, Santiago Pinon.
@@ -39,6 +42,7 @@ import argparse
 import logging
 import logging.handlers
 import math
+import shlex
 import shutil
 import signal
 import subprocess
@@ -57,6 +61,20 @@ logger = logging.getLogger("orchestrator")
 DEFAULT_SCHEDULE = {"dslr": 30, "environmental": 60}
 DEFAULT_NIGHT_SUN_ELEVATION_DEG = 3.0
 DEFAULT_SUPERVISE = ["capture-uv-monitor.service", "multicam:capture-ir-video.service"]
+DEFAULT_FRESHNESS_MIN = {
+    "uv": 2,
+    "spectrometer": 2,
+    "infrared": 2,
+    "dslr": 5,
+    "environmental": 5,
+}
+# These stop at night, when the UV monitor closes its devices.
+DAYLIGHT_INSTRUMENTS = {"uv", "spectrometer"}
+DEFAULT_MIN_SUN_ELEVATION_DEG = 5.0
+# Margin above that elevation before daylight instruments are expected again.
+DAYLIGHT_MARGIN_DEG = 1.0
+FRESHNESS_GRACE_S = 300  # no warnings while everything is starting up
+FRESHNESS_REMIND_S = 600
 SSH_OPTIONS = [
     "-o",
     "BatchMode=yes",
@@ -248,6 +266,97 @@ def supervise_once(
         )
 
 
+def _freshness_script(data_dir: str, max_age_min: dict[str, int]) -> str:
+    """
+    Shell script printing each instrument with a recent, non-empty file on this
+    node. Files move between folders and nodes, so it looks in ``receive/`` and
+    today's and yesterday's ``archive/`` folders (keeping the check cheap).
+    """
+
+    lines = [
+        f"cd {shlex.quote(data_dir)} || exit 3",
+        "d0=$(date -u +%j); d1=$(date -u -d yesterday +%j)",
+    ]
+    for name, minutes in max_age_min.items():
+        i = shlex.quote(name)
+        lines.append(
+            f'[ -n "$(find {i}/receive {i}/archive/*/*/*/$d0 {i}/archive/*/*/*/$d1 '
+            f"-maxdepth 1 -type f -mmin -{int(minutes)} ! -name '.*' -size +0c "
+            f'-print -quit 2>/dev/null)" ] && echo {i}'
+        )
+    lines.append("exit 0")
+    return "\n".join(lines)
+
+
+class FreshnessCheck:
+    """Warn about instruments that have stopped producing files."""
+
+    def __init__(
+        self,
+        data_dir: str,
+        max_age_min: dict[str, int],
+        remote: Remote,
+        site: tuple[float, float] | None,
+        min_sun_elevation_deg: float,
+    ) -> None:
+        self.max_age_min = max_age_min
+        self.script = _freshness_script(data_dir, max_age_min)
+        self.remote = remote
+        self.site = site
+        self.min_sun_elevation_deg = min_sun_elevation_deg
+        self.started = time.monotonic()
+        self.warned: dict[str, float] = {}  # instrument: when last warned
+
+    def _fresh_on(self, cmd: list[str], where: str) -> set[str] | None:
+        """Instruments with recent files on one node; None if it can't be checked."""
+
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as e:
+            logger.warning("freshness: could not check %s: %s", where, e)
+            return None
+        if proc.returncode != 0:
+            logger.warning(
+                "freshness: could not check %s (rc=%d)", where, proc.returncode
+            )
+            return None
+        return set(proc.stdout.split())
+
+    def _expected(self, name: str) -> bool:
+        """Should this instrument be producing files now?"""
+
+        if name not in DAYLIGHT_INSTRUMENTS or self.site is None:
+            return True
+        elevation = solar_elevation_deg(dt.now(UTC), *self.site)
+        return elevation >= self.min_sun_elevation_deg + DAYLIGHT_MARGIN_DEG
+
+    def check(self, dry_run: bool) -> None:
+        """Log instruments that went stale, are still stale, or have recovered."""
+
+        if dry_run:
+            logger.info("[DRY RUN] freshness: %s", self.max_age_min)
+            return
+        now = time.monotonic()
+        if now - self.started < FRESHNESS_GRACE_S:
+            return
+
+        local = self._fresh_on(["sh", "-c", self.script], "uvcam")
+        remote = self._fresh_on(self.remote.command([self.script]), "multicam")
+        if local is None or remote is None:
+            return  # can't tell; a file may be on the node that didn't answer
+        fresh = local | remote
+
+        for name, minutes in self.max_age_min.items():
+            if name in fresh or not self._expected(name):
+                if self.warned.pop(name, None) is not None:
+                    logger.info("freshness: %s: back to normal", name)
+            elif now - self.warned.get(name, -FRESHNESS_REMIND_S) >= FRESHNESS_REMIND_S:
+                logger.warning(
+                    "freshness: %s: no new file for over %d min", name, minutes
+                )
+                self.warned[name] = now
+
+
 # ---------------------------------------------------------------------------
 # Scheduler
 # ---------------------------------------------------------------------------
@@ -288,7 +397,11 @@ def _night_schedule(
 
 
 def run_scheduler(
-    args, orch_config: dict, site: tuple[float, float] | None = None
+    args,
+    orch_config: dict,
+    site: tuple[float, float] | None = None,
+    data_dir: str = "/home/user/data",
+    min_sun_elevation_deg: float = DEFAULT_MIN_SUN_ELEVATION_DEG,
 ) -> None:
     """
     Fire each task on round UTC multiples of its interval until SIGTERM/SIGINT.
@@ -311,9 +424,20 @@ def run_scheduler(
     supervise_restart = bool(orch_config.get("supervise_restart", True))
     supervise_s = float(orch_config.get("supervise_interval_s", 60))
 
+    max_age_min = dict(orch_config.get("freshness_max_age_min", DEFAULT_FRESHNESS_MIN))
+    for name in args.skip or []:
+        max_age_min.pop(name, None)
+    freshness = (
+        FreshnessCheck(data_dir, max_age_min, remote, site, min_sun_elevation_deg)
+        if supervise and max_age_min
+        else None
+    )
+
     def run_task(name: str) -> None:
         if name == "supervise":
             supervise_once(supervise, remote, supervise_restart, args.dry_run)
+            if freshness is not None:
+                freshness.check(args.dry_run)
         else:
             _, timeout_s, cmd = tasks[name]
             _run_subprocess(cmd, name, timeout_s, args.dry_run)
@@ -491,7 +615,13 @@ def main() -> None:
 
     if args.once:
         sys.exit(0 if run_once(args, orch_config) else 1)
-    run_scheduler(args, orch_config, site)
+    run_scheduler(
+        args,
+        orch_config,
+        site,
+        config["metadata"]["data_archive"],
+        float(uv_sync.get("min_sun_elevation_deg", DEFAULT_MIN_SUN_ELEVATION_DEG)),
+    )
 
 
 if __name__ == "__main__":
