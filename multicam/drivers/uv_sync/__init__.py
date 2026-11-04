@@ -44,12 +44,10 @@ import csv
 import json
 import logging
 import math
-import os
 import pathlib
 import signal
 import sys
 import time
-from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime as dt
 
@@ -70,6 +68,7 @@ from multicam.drivers.ultraviolet.picam import (
     raw_brightness,
 )
 from multicam.errors import CaptureFailure
+from multicam.utilities.files import atomic_write
 from multicam.utilities.naming import build_filename
 from multicam.utilities.sun import solar_elevation_deg
 
@@ -144,18 +143,6 @@ def _read_uv_state(state_path: pathlib.Path) -> dict:
         return json.loads(state_path.read_text())
     except (OSError, json.JSONDecodeError):
         return {}
-
-
-def _atomic_write(path: pathlib.Path, write: Callable[[pathlib.Path], None]) -> None:
-    """
-    Write via a temp name then ``os.replace`` into place, so the file monitor
-    only ever sees complete files and a kill mid-write leaves no partial file.
-    """
-
-    # Hidden temp name: the file monitor skips dot-files and *.tmp.
-    tmp = path.with_name(f".{path.name}.tmp")
-    write(tmp)
-    os.replace(tmp, path)
 
 
 class _UVSession:
@@ -499,7 +486,7 @@ class _UVSession:
                         binning=md["binning"],
                     )
 
-            _atomic_write(receive / npz_name, _write_npz)
+            atomic_write(receive / npz_name, _write_npz)
             files[label] = npz_name
 
             if self.write_quicklook and quicklook_png:
@@ -514,7 +501,7 @@ class _UVSession:
                         raise OSError("PNG encoding failed")
                     tmp.write_bytes(buf.tobytes())
 
-                _atomic_write(receive / png_name, _write_png)
+                atomic_write(receive / png_name, _write_png)
                 files[f"{label}_quicklook"] = png_name
 
         files["spectrum"] = None
@@ -535,7 +522,7 @@ class _UVSession:
                     for wl, inten in zip(wavelengths, intensities, strict=True):
                         writer.writerow([round(wl, 4), round(float(inten), 4)])
 
-            _atomic_write(self.spec_output_dir / "receive" / spec_name, _write_csv)
+            atomic_write(self.spec_output_dir / "receive" / spec_name, _write_csv)
             files["spectrum"] = spec_name
 
         meta_name = build_filename(
@@ -568,7 +555,7 @@ class _UVSession:
             ),
             "files": files,
         }
-        _atomic_write(
+        atomic_write(
             receive / meta_name,
             lambda tmp: tmp.write_text(json.dumps(meta_payload, indent=2)),
         )
@@ -587,7 +574,7 @@ class _UVSession:
             payload["spec_config_integration_ms"] = self.config_spec_ms
         payload["updated_utc"] = timestamp.isoformat()
         try:
-            _atomic_write(
+            atomic_write(
                 self.state_path,
                 lambda tmp: tmp.write_text(json.dumps(payload, indent=2)),
             )

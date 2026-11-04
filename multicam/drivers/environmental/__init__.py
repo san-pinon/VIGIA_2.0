@@ -19,6 +19,7 @@ from datetime import UTC
 from datetime import datetime as dt
 
 from multicam.errors import CaptureFailure
+from multicam.utilities.files import atomic_write_text
 
 from .bme280 import BME280
 from .bme280 import capture as bme280_capture
@@ -47,7 +48,7 @@ def _write_reading(timestamp: dt, readings: dict, config: dict) -> None:
         "timestamp_utc": timestamp.isoformat(),
         "readings": readings,
     }
-    dest.write_text(json.dumps(payload, indent=2))
+    atomic_write_text(dest, json.dumps(payload, indent=2))
 
 
 def capture_environmental(config: dict, extra_args: list[str] | None = None) -> None:

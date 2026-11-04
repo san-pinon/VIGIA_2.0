@@ -28,7 +28,6 @@ See ``capture_video`` for details.
 import argparse
 import json
 import math
-import os
 import pathlib
 import signal
 import sys
@@ -39,6 +38,7 @@ from datetime import datetime as dt
 import cv2
 import numpy as np
 
+from multicam.utilities.files import atomic_write, atomic_write_bytes, atomic_write_text
 from multicam.utilities.naming import build_filename
 
 from . import (
@@ -582,14 +582,10 @@ def _write_colour_png(
         else None,
         decimals=irange["decimals"],
     )
-    # Encode in memory: a "*.tmp.png" temp name would not be skipped by the
-    # file monitor (it ignores "*.tmp" only).
     ok, png = cv2.imencode(".png", colour)
     if not ok:
         raise OSError("PNG encoding failed")
-    png_tmp = receive / (colour_name + ".tmp")
-    png_tmp.write_bytes(png.tobytes())
-    os.replace(png_tmp, receive / colour_name)
+    atomic_write_bytes(receive / colour_name, png.tobytes())
     return colour_name
 
 
@@ -604,9 +600,9 @@ def _flush_window(
     """
     Write one window's outputs (``.npz`` cube + baseline ``.png`` + metadata JSON).
 
-    Each file is written to a temp name and ``os.replace``-d into place so the
-    ``file_monitor`` inotify watcher only ever sees complete files and a mid-write
-    kill cannot leave a partial file in ``receive/``.
+    Each file goes through ``atomic_write``: the ``file_monitor`` inotify watcher
+    only ever sees complete files, and neither a kill nor a power cut leaves a
+    partial or empty file in ``receive/``.
     """
 
     receive = archive / "receive"
@@ -617,16 +613,18 @@ def _flush_window(
     cube_name = build_filename(
         metadata_cfg, window_start, suffix="thermal", extension="npz"
     )
-    cube_tmp = receive / (cube_name + ".tmp")
-    with open(cube_tmp, "wb") as fh:
-        np.savez_compressed(
-            fh,
-            thermal=cube,
-            timestamps=np.array(win["kept_ts"]),
-            frame_indices=np.array(win["kept_indices"]),
-            kept_reasons=np.array(win["kept_reasons"]),
-        )
-    os.replace(cube_tmp, receive / cube_name)
+
+    def _write_cube(tmp: pathlib.Path) -> None:
+        with open(tmp, "wb") as fh:
+            np.savez_compressed(
+                fh,
+                thermal=cube,
+                timestamps=np.array(win["kept_ts"]),
+                frame_indices=np.array(win["kept_indices"]),
+                kept_reasons=np.array(win["kept_reasons"]),
+            )
+
+    atomic_write(receive / cube_name, _write_cube)
 
     # --- Baseline colour quick-look (.png) for the dashboard ---
     # With --png-interval-s, only for windows starting on a multiple of it.
@@ -670,9 +668,7 @@ def _flush_window(
         "frames": win["all_stats"],
         "files": {"thermal_window": cube_name, "colour": colour_name},
     }
-    meta_tmp = receive / (meta_name + ".tmp")
-    meta_tmp.write_text(json.dumps(meta_payload, indent=2))
-    os.replace(meta_tmp, receive / meta_name)
+    atomic_write_text(receive / meta_name, json.dumps(meta_payload, indent=2))
 
     print(
         f"   ...window {window_start.isoformat()} flushed: "

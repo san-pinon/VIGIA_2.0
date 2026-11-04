@@ -19,7 +19,6 @@ Metering (``--meter-with``):
 
 import argparse
 import json
-import os
 import pathlib
 import sys
 import time
@@ -34,6 +33,7 @@ from multicam.drivers.visible.canon import Camera as CanonCamera
 from multicam.drivers.visible.canon import capture as capture_canon
 from multicam.drivers.visible.v4l2cam import Camera as V4L2Camera
 from multicam.errors import CaptureFailure
+from multicam.utilities.files import atomic_write_bytes
 from multicam.utilities.naming import build_filename
 
 from .metering import (
@@ -63,18 +63,6 @@ def _read_state(path: pathlib.Path, max_age_s: float) -> dict | None:
     except (OSError, ValueError, KeyError, TypeError):
         return None
     return state if 0 <= age_s <= max_age_s else None
-
-
-def _atomic_write(path: pathlib.Path, data: bytes) -> None:
-    """
-    Write via a hidden temp name then ``os.replace`` into place, so the file
-    monitor only sees complete files and a kill mid-write (orchestrator
-    timeout) leaves no partial file in ``receive/``.
-    """
-
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
 
 
 def _encode(
@@ -285,7 +273,7 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
             min_stops, min(max_stops, next_stops(shot_stops, canon_p95, target_p95))
         )
         try:
-            _atomic_write(
+            atomic_write_bytes(
                 state_path,
                 json.dumps(
                     {
@@ -310,7 +298,7 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
     canon_fname = build_filename(
         metadata_cfg, timestamp, suffix="canon", extension="jpg"
     )
-    _atomic_write(
+    atomic_write_bytes(
         canon_archive / "receive" / canon_fname,
         _encode(
             cv2.cvtColor(canon_image, cv2.COLOR_RGB2BGR),
@@ -326,7 +314,7 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
         picam_fname = build_filename(
             metadata_cfg, timestamp, suffix="meter", extension="png"
         )
-        _atomic_write(
+        atomic_write_bytes(
             picam_archive / "receive" / picam_fname, _encode(last_picam_frame, ".png")
         )
         print(f"   Saved picam frame: {picam_fname}")
@@ -364,7 +352,7 @@ def capture_dslr(config: dict, extra_args: list[str] | None = None) -> None:
             "picam_image": picam_fname,
         },
     }
-    _atomic_write(
+    atomic_write_bytes(
         canon_archive / "receive" / meta_fname,
         json.dumps(meta_payload, indent=2).encode(),
     )
