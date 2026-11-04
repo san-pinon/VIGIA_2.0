@@ -289,6 +289,7 @@ transmit           = false  # true: also hard-link each archived file into {inst
                             # (for telemetry; nothing clears transmit/ yet).
 forward_to         = ""     # rsync destination for {data_archive}/*/archive/. uvcam:
                             # "user@192.168.30.150:/home/user/data"; multicam: "" (off).
-                            # Files are removed here only once transferred.
+                            # Files are removed here only once transferred and flushed
+                            # to the destination's disk.
 forward_interval_s = 60
 min_free_gb        = 5      # warn in the log when free space under data_archive drops below this

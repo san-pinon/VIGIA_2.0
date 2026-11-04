@@ -25,8 +25,11 @@ picked up by a rescan every 60 s.
 
 If ``[file_monitor] forward_to`` is set (uvcam), a background thread moves
 the local archive to that rsync destination (multicam) every
-``forward_interval_s``.  Files leave this node only once transferred, so an
-outage of the destination just builds a backlog here.
+``forward_interval_s``.  Files leave this node only once transferred and flushed
+to the destination's disk, so neither an outage nor a power cut there loses them.
+
+Empty files are dropped with a warning, and temp files left behind by an
+interrupted write or transfer are removed once they are old.
 
 Run as a long-lived systemd service (see ``systemd-units/file-monitor.service``).
 
@@ -40,6 +43,7 @@ Run as a long-lived systemd service (see ``systemd-units/file-monitor.service``)
 
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import threading
@@ -51,6 +55,14 @@ RESCAN_INTERVAL_S = 60
 # A backlog file modified more recently than this may still be open for
 # writing; its IN_CLOSE_WRITE event (the watch is already in place) archives it.
 BACKLOG_MIN_AGE_S = 10
+# Temp files older than this were left by an interrupted write or transfer.
+STALE_TEMP_AGE_S = 3600
+STALE_TEMP_CHECK_S = 3600
+SSH_COMMAND = (
+    "ssh -o BatchMode=yes -o ConnectTimeout=10 "
+    "-o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+)
+FLUSH_TIMEOUT_S = 120
 
 
 def _parse_filename(name: str) -> tuple[str, str, str, int]:
@@ -92,6 +104,15 @@ def archive_file(source: pathlib.Path, transmit: bool = False) -> int:
     except ValueError as exc:
         print(f"   ...skipping unrecognised filename: {exc}")
         return 1
+
+    # Writers rename complete files into receive/, so this isn't one in progress.
+    try:
+        if source.stat().st_size == 0:
+            print(f"WARNING: dropping empty file {source.name}")
+            source.unlink(missing_ok=True)
+            return 0
+    except FileNotFoundError:
+        return 0  # already handled (backlog sweep and inotify both saw it)
 
     # Structure: {instrument}/archive/{vnum}/{year}/{site}/{julday:03d}/
     archive_dir = source.parents[1] / "archive" / vnum / year / site / f"{julday:03d}"
@@ -138,42 +159,75 @@ def _prune_empty_dirs(root: pathlib.Path) -> None:
             pass  # not empty, or just re-created by archive_file
 
 
+def _archived_files(data_dir: pathlib.Path) -> list[str]:
+    """Finished files under ``{instrument}/archive/``, relative to ``data_dir``."""
+
+    files = []
+    for archive_root in data_dir.glob("*/archive"):
+        for dirpath, _, names in os.walk(archive_root):
+            files += [
+                os.path.relpath(os.path.join(dirpath, name), data_dir)
+                for name in names
+                if not _is_temp(name)
+            ]
+    return sorted(files)
+
+
+def _flush_destination(destination: str) -> int:
+    """Force the destination's data to its disk (rsync alone doesn't); 0 = done."""
+
+    host, separator, path = destination.partition(":")
+    try:
+        if not separator:
+            os.sync()
+            return 0
+        command = [*shlex.split(SSH_COMMAND), host, f"sync -f {shlex.quote(path)}"]
+        return subprocess.run(command, timeout=FLUSH_TIMEOUT_S).returncode
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"Flushing {destination} failed: {exc}")
+        return 1
+
+
 def forward_archive(data_dir: pathlib.Path, destination: str) -> int:
     """
     Move every ``{data_dir}/{instrument}/archive/`` tree to ``destination``
     (``user@host:/path`` or a local path) in one rsync call.
 
-    Only files rsync has transferred are removed here, so a failed or
-    interrupted run leaves the rest for the next one.
+    Files are removed here only after rsync has transferred all of them and the
+    destination has flushed them to disk, so a failed run, or a power cut at the
+    destination, leaves them for the next run (which skips those already there).
 
     Returns
     -------
     return_code:
-        The rsync return code (0 = success).
+        0 = success; otherwise the code from rsync or from the flush.
 
     """
+
+    files = _archived_files(data_dir)
+    if not files:
+        return 0
 
     command = [
         "rsync",
         "-a",
-        "--remove-source-files",
-        "--exclude=.*",
-        "--exclude=*.tmp",
-        "--include=/*/",
-        "--include=/*/archive/***",
-        "--exclude=*",
+        "--files-from=-",
         "-e",
-        "ssh -o BatchMode=yes -o ConnectTimeout=10 "
-        "-o ServerAliveInterval=15 -o ServerAliveCountMax=4",
+        SSH_COMMAND,
         f"{data_dir}/",
         f"{destination.rstrip('/')}/",
     ]
-    ret = subprocess.run(command).returncode
+    ret = subprocess.run(command, input="\n".join(files) + "\n", text=True).returncode
+    if ret == 0:
+        ret = _flush_destination(destination)
+    if ret != 0:
+        return ret
 
+    for name in files:
+        (data_dir / name).unlink(missing_ok=True)
     for archive_root in data_dir.glob("*/archive"):
         _prune_empty_dirs(archive_root)
-
-    return ret
+    return 0
 
 
 def _forward_loop(
@@ -189,7 +243,7 @@ def _forward_loop(
         start = time.monotonic()
         ret = forward_archive(data_dir, destination)
         if ret != 0:
-            print(f"Forward to {destination} failed (rsync code {ret}); retrying.")
+            print(f"Forward to {destination} failed (code {ret}); retrying.")
             failing = True
         elif failing:
             print(f"Forward to {destination} recovered.")
@@ -200,6 +254,30 @@ def _forward_loop(
             print(f"WARNING: only {free_gb:.1f} GB free under {data_dir}.")
 
         time.sleep(max(0.0, interval_s - (time.monotonic() - start)))
+
+
+def remove_stale_temps(data_dir: pathlib.Path) -> None:
+    """Remove old temp files from ``receive/`` and ``archive/`` trees."""
+
+    oldest_allowed = time.time() - STALE_TEMP_AGE_S
+    for root in [*data_dir.glob("*/receive"), *data_dir.glob("*/archive")]:
+        for dirpath, _, names in os.walk(root):
+            for name in names:
+                path = pathlib.Path(dirpath) / name
+                try:
+                    if _is_temp(name) and path.stat().st_mtime < oldest_allowed:
+                        path.unlink()
+                        print(f"Removed stale temp file: {path}")
+                except OSError:
+                    pass  # gone already, or will be retried next time
+
+
+def _stale_temp_loop(data_dir: pathlib.Path) -> None:
+    """Clear out stale temp files now and every ``STALE_TEMP_CHECK_S``, forever."""
+
+    while True:
+        remove_stale_temps(data_dir)
+        time.sleep(STALE_TEMP_CHECK_S)
 
 
 def _sweep(receive_dir: pathlib.Path, transmit: bool) -> None:
@@ -238,6 +316,10 @@ def monitor_for_files(config_path: pathlib.Path | None = None) -> None:
     fm_config = config.get("file_monitor", {})
     transmit = fm_config.get("transmit", False)
     forward_to = fm_config.get("forward_to", "")
+
+    threading.Thread(
+        target=_stale_temp_loop, args=(data_dir,), name="stale-temps", daemon=True
+    ).start()
 
     if forward_to:
         interval_s = float(fm_config.get("forward_interval_s", 60))
