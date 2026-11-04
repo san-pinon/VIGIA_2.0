@@ -29,6 +29,7 @@ def synchronized_capture(
     spectrometer,
     stack_count: int = 10,
     spec_config: dict[str, Any] | None = None,
+    spec_optional: bool = False,
 ) -> tuple[CaptureResult, CaptureResult, CaptureResult | None]:
     """
     Barrier-synchronized capture of both UV cameras and the spectrometer.
@@ -47,12 +48,16 @@ def synchronized_capture(
         Number of spectra to co-add.
     spec_config:
         Spectrometer settings dict (passed to ``spectrometer.capture``).
+    spec_optional:
+        A failed spectrum doesn't fail the capture: the UV frames are still
+        returned, with ``None`` for the spectrum.
 
     Returns
     -------
     uv1_result, uv2_result, spec_result:
         Capture results for camera 1, camera 2, and the spectrometer
-        (``None`` when no spectrometer was given).
+        (``None`` when no spectrometer was given, or ``spec_optional`` and the
+        spectrum failed).
 
     """
 
@@ -87,11 +92,18 @@ def synchronized_capture(
         threading.Thread(target=_capture_uv, args=(2,), name="uv2"),
     ]
     if use_spec:
-        threads.append(threading.Thread(target=_capture_spec, name="spec"))
+        # Daemon: a hung spectrometer must not keep the process alive.
+        threads.append(threading.Thread(target=_capture_spec, name="spec", daemon=True))
     for t in threads:
         t.start()
     for t in threads:
         t.join(timeout=60)
+
+    if use_spec and spec_optional and ("spec" in errors or "spec" not in results):
+        reason = errors.pop("spec", "no result in time")
+        print(f"   WARNING: spectrum failed, keeping the UV frames: {reason}")
+        use_spec = False
+        results.pop("spec", None)
 
     if errors:
         msgs = [f"{k}: {v}" for k, v in errors.items()]

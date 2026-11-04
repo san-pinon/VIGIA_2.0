@@ -18,7 +18,9 @@ Two modes:
   ``min_sun_elevation_deg`` (when the site coordinates are configured). Stops
   cleanly on SIGTERM/SIGINT; run as ``capture-uv-monitor.service``. The
   spectrum must fit in ``monitor_spec_budget_s``: fewer spectra are co-added
-  as integration grows, and integration is capped at half the budget.
+  as integration grows, and integration is capped at half the budget. A missing
+  or failing spectrometer doesn't stop the UV cameras: frames are saved without
+  a spectrum and the spectrometer is retried every ``monitor_spec_retry_s``.
 
 ``--kind dark|clear`` tags a capture set (filenames and metadata). Dark
 captures keep the exposure fixed — cover the lenses/fibre first.
@@ -47,6 +49,7 @@ import math
 import pathlib
 import signal
 import sys
+import threading
 import time
 from datetime import UTC
 from datetime import datetime as dt
@@ -99,6 +102,8 @@ DEFAULT_MIN_SUN_ELEVATION_DEG = 5.0
 # Monitor: exit (non-zero) after this many device problems in a row (failed
 # opens + forced reopens) with no good capture between them; 0 = never.
 DEFAULT_MONITOR_MAX_REOPENS = 5
+# Monitor: seconds between attempts to get a missing spectrometer back.
+DEFAULT_MONITOR_SPEC_RETRY_S = 60.0
 
 
 def _next_uv_exposure(
@@ -250,6 +255,12 @@ class _UVSession:
 
         self.cameras: DualCamera | None = None
         self.spectrometer: Spectrometer | None = None
+        # Monitor mode: carry on with the cameras alone if the spectrometer is
+        # missing or fails, and keep trying to get it back.
+        self.spec_optional = False
+        self.spec_retry_s = DEFAULT_MONITOR_SPEC_RETRY_S
+        self._spec_retry_at = 0.0
+        self._spec_missing = False
 
     # --- devices -----------------------------------------------------------
 
@@ -266,8 +277,6 @@ class _UVSession:
             print("Initialising UV cameras (spectrometer disabled)...")
         self.cameras = DualCamera(self.uv_config)
         try:
-            if self.use_spec:
-                self.spectrometer = Spectrometer(self.spec_config)
             for n in (1, 2):
                 start_ms, source = self.start_exposure[n]
                 start_ms = self.allowed_exposure_ms(start_ms)
@@ -282,8 +291,7 @@ class _UVSession:
                     f"binning {self.cameras.binning}, "
                     f"raw {self.cameras.raw_format[n]}"
                 )
-            if self.spectrometer is not None:
-                self.spectrometer.integration_time_ms = self.spec_ms
+            if self.use_spec and self._open_spectrometer():
                 print(
                     f"   Spectrometer: starting at {self.spec_ms:.3f} ms "
                     f"({self.spec_source})"
@@ -291,6 +299,53 @@ class _UVSession:
         except Exception:
             self.close()
             raise
+
+    def _open_spectrometer(self) -> bool:
+        """Open the spectrometer; if it's optional, a failure is only noted."""
+
+        spectrometer = None
+        try:
+            spectrometer = Spectrometer(self.spec_config)
+            spectrometer.integration_time_ms = self.spec_ms
+        except Exception as e:
+            if spectrometer is not None:
+                spectrometer.shutdown()
+            if not self.spec_optional:
+                raise
+            self._spec_retry_at = time.monotonic() + self.spec_retry_s
+            if not self._spec_missing:
+                print(
+                    f"   WARNING: no spectrometer ({e}); UV continues without it, "
+                    f"retrying every {self.spec_retry_s:g} s"
+                )
+                self._spec_missing = True
+            return False
+        self.spectrometer = spectrometer
+        self._spec_missing = False
+        return True
+
+    def _drop_spectrometer(self) -> None:
+        """Forget a failed spectrometer; a stuck close must not block the UV."""
+
+        spectrometer, self.spectrometer = self.spectrometer, None
+        self._spec_retry_at = time.monotonic() + self.spec_retry_s
+        self._spec_missing = True
+        print(f"   ...retrying the spectrometer every {self.spec_retry_s:g} s")
+        closer = threading.Thread(target=spectrometer.shutdown, daemon=True)
+        closer.start()
+        closer.join(timeout=5)
+
+    def retry_spectrometer(self) -> None:
+        """Monitor: try to get a missing spectrometer back, when it's time."""
+
+        if (
+            self.use_spec
+            and self.is_open
+            and self.spectrometer is None
+            and time.monotonic() >= self._spec_retry_at
+            and self._open_spectrometer()
+        ):
+            print(f"   Spectrometer back, at {self.spec_ms:.3f} ms")
 
     def close(self) -> None:
         if self.spectrometer is not None:
@@ -329,7 +384,7 @@ class _UVSession:
         return _snap_to_ladder(exposure_ms, self.ladder, self.continuous_max_ms)
 
     def capture(self) -> tuple[CaptureResult, CaptureResult, CaptureResult | None]:
-        return synchronized_capture(
+        uv1, uv2, spec = synchronized_capture(
             self.cameras,
             self.spectrometer,
             stack_count=self.spec_stack(),
@@ -337,7 +392,11 @@ class _UVSession:
                 "integration_time_ms": self.spec_ms,
                 "stacking": self.spec_stack(),
             },
+            spec_optional=self.spec_optional,
         )
+        if spec is None and self.spectrometer is not None:
+            self._drop_spectrometer()
+        return uv1, uv2, spec
 
     def describe_settings(self) -> str:
         spec = (
@@ -725,6 +784,10 @@ def _run_monitor(session: _UVSession, flags: argparse.Namespace) -> None:
             f"{interval:g} s — captures with the spectrometer will overrun"
         )
     session.set_spec_budget(spec_budget_s)
+    session.spec_optional = True
+    session.spec_retry_s = float(
+        session.sync_config.get("monitor_spec_retry_s", DEFAULT_MONITOR_SPEC_RETRY_S)
+    )
     max_reopens = int(
         session.sync_config.get("monitor_max_reopens", DEFAULT_MONITOR_MAX_REOPENS)
     )
@@ -881,6 +944,8 @@ def _run_monitor(session: _UVSession, flags: argparse.Namespace) -> None:
                     else ""
                 )
             )
+            # After the tick, so a slow attempt doesn't delay this capture.
+            session.retry_spectrometer()
     finally:
         session.close()
         print("...UV monitor stopped.")

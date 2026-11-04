@@ -228,6 +228,7 @@ quicklook_interval_s  = 60    # Monitor: PNG previews only on the tick at each m
 min_sun_elevation_deg = 5     # Devices closed while the sun is below this
 monitor_max_reopens   = 5     # Monitor: exit (code 1, systemd restarts it) after this many failed
                               # opens/reopens with no good capture in between; 0 = never
+monitor_spec_retry_s  = 60    # Monitor: UV continues without a missing/failed spectrometer; retry it this often (s)
 # Camera site for the daylight gate (decimal degrees, north/east positive).
 # Without them the monitor captures day and night.
 latitude  = 19.067043     # UV camera site, ~4000 m a.s.l.
