@@ -26,7 +26,9 @@ The orchestrator schedules the slower captures and watches the services:
   not running (``sudo -n``: needs passwordless sudo for systemctl);
 - at the same time it warns about any instrument in ``freshness_max_age_min``
   with no new file for that long, whatever the cause: a service can be
-  ``active`` and still be producing nothing. This only logs.
+  ``active`` and still be producing nothing. This only logs;
+- after ``canon_usb_reset_after`` failed Canon shots in a row it resets the
+  Canon's USB port on multicam, at most once per ``canon_usb_reset_every_min``.
 
 :copyright:
     2026, Santiago Pinon.
@@ -75,6 +77,11 @@ DEFAULT_MIN_SUN_ELEVATION_DEG = 5.0
 DAYLIGHT_MARGIN_DEG = 1.0
 FRESHNESS_GRACE_S = 300  # no warnings while everything is starting up
 FRESHNESS_REMIND_S = 600
+DEFAULT_CANON_USB_RESET_AFTER = 6  # failed shots in a row; 0 = never reset
+DEFAULT_CANON_USB_RESET_EVERY_MIN = 30
+DEFAULT_CANON_USB_PORT = "1-4"  # used when the Canon has dropped off the bus
+CANON_USB_RESET_COMMAND = "/usr/local/sbin/vigia-canon-usb-reset"
+CANON_USB_RESET_TIMEOUT_S = 30
 SSH_OPTIONS = [
     "-o",
     "BatchMode=yes",
@@ -266,6 +273,46 @@ def supervise_once(
         )
 
 
+class CanonUsbReset:
+    """Reset the Canon's USB port when its shots keep failing."""
+
+    def __init__(self, command: list[str], after: int, every_s: float, dry_run: bool):
+        self.command = command
+        self.after = after
+        self.every_s = every_s
+        self.dry_run = dry_run
+        self.failures = 0
+        self.last_reset: float | None = None
+        self.reset_since_good_shot = False
+
+    def record(self, ok: bool) -> None:
+        """Note one shot's outcome, and reset the port if it's time to."""
+
+        if ok:
+            if self.reset_since_good_shot:
+                logger.info(
+                    "dslr: back after USB reset (%d failed shots)", self.failures
+                )
+            self.failures = 0
+            self.reset_since_good_shot = False
+            return
+
+        self.failures += 1
+        if self.after <= 0 or self.failures < self.after:
+            return
+        now = time.monotonic()
+        if self.last_reset is not None and now - self.last_reset < self.every_s:
+            return
+        self.last_reset = now
+        self.reset_since_good_shot = True
+        logger.warning(
+            "dslr: %d failed shots in a row — USB reset of its port", self.failures
+        )
+        _run_subprocess(
+            self.command, "dslr USB reset", CANON_USB_RESET_TIMEOUT_S, self.dry_run
+        )
+
+
 def _freshness_script(data_dir: str, max_age_min: dict[str, int]) -> str:
     """
     Shell script printing each instrument with a recent, non-empty file on this
@@ -450,6 +497,25 @@ def run_scheduler(
         else None
     )
 
+    usb_reset = CanonUsbReset(
+        remote.command(
+            [
+                "sudo",
+                "-n",
+                CANON_USB_RESET_COMMAND,
+                str(orch_config.get("canon_usb_port", DEFAULT_CANON_USB_PORT)),
+            ]
+        ),
+        int(orch_config.get("canon_usb_reset_after", DEFAULT_CANON_USB_RESET_AFTER)),
+        60.0
+        * float(
+            orch_config.get(
+                "canon_usb_reset_every_min", DEFAULT_CANON_USB_RESET_EVERY_MIN
+            )
+        ),
+        args.dry_run,
+    )
+
     def run_task(name: str) -> None:
         if name == "supervise":
             supervise_once(supervise, remote, supervise_restart, args.dry_run)
@@ -457,7 +523,9 @@ def run_scheduler(
                 freshness.check(args.dry_run)
         else:
             _, timeout_s, cmd = tasks[name]
-            _run_subprocess(cmd, name, timeout_s, args.dry_run)
+            ok = _run_subprocess(cmd, name, timeout_s, args.dry_run)
+            if name == "dslr":
+                usb_reset.record(ok)
 
     intervals = {name: iv for name, (iv, _, _) in tasks.items()}
     night = _night_schedule(orch_config, intervals, site)

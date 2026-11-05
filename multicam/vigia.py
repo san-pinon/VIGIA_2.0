@@ -69,7 +69,7 @@ WITTY_DEFAULT_STATE_REG = "17"
 WITTY_DEFAULT_ON = "0x01"
 
 PROBLEM_LINES = 8
-PROBLEM_PATTERN = "supervise|failed|timed out|skipped|freshness"
+PROBLEM_PATTERN = "supervise|failed|timed out|skipped|freshness|USB reset"
 
 
 @dataclass

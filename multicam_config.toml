@@ -278,6 +278,12 @@ supervise_restart    = true   # start a supervised unit that is inactive/failed 
 # Warn if an instrument has written no new file for this many minutes (checked on both
 # nodes, with the supervise check; ultraviolet + spectrometer only in daylight). Log only. {} = off.
 freshness_max_age_min = { ultraviolet = 2, spectrometer = 2, infrared = 2, dslr = 5, environmental = 5 }
+# After this many failed Canon shots in a row, reset its USB port on multicam (0 = never),
+# at most once per canon_usb_reset_every_min. canon_usb_port is used when the Canon has
+# dropped off the bus. Needs /usr/local/sbin/vigia-canon-usb-reset (scripts/canon_usb_reset.sh).
+canon_usb_reset_after     = 6
+canon_usb_reset_every_min = 30
+canon_usb_port            = "1-4"
 multicam_host   = "192.168.30.150"
 multicam_user   = "user"
 remote_venv_bin = "/home/user/.venv/bin/multicamctl"
