@@ -93,8 +93,8 @@ nuc_max_interval_s = 1800   # Safety ceiling: force a NUC after this many second
 model       = "v4l2"    # "v4l2" | "canon"
 framerate   = 5
 frame_count = 10
-camera_port = 2             # /dev/videoN index — Arducam is at /dev/video2 (video0-1 = Optris)
-expected_card_name = "Arducam"  # V4L2 card name substring — prevents capturing from wrong device
+camera_port = 2             # /dev/videoN fallback; numbers can change, expected_card_name decides
+expected_card_name = "Arducam"  # V4L2 card name substring — finds the device, whatever its number
 # Output goes to {data_archive}/picam/receive/ (shared with DSLR metering frames)
 # width  = 4056         # optional: force capture resolution (v4l2 only)
 # height = 3040         # optional: force capture resolution (v4l2 only)
