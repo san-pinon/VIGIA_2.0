@@ -45,6 +45,7 @@ dependencies = [
 [project.scripts]
 multicamctl = "multicam.cli:entry_point"
 vigia-orchestrator = "multicam.orchestrator:main"
+vigia = "multicam.vigia:main"
 
 [project.optional-dependencies]
 docs = ["Sphinx >= 1.8.1", "docutils"]

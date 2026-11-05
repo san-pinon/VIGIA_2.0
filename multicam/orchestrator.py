@@ -288,6 +288,28 @@ def _freshness_script(data_dir: str, max_age_min: dict[str, int]) -> str:
     return "\n".join(lines)
 
 
+def site_from_config(uv_sync: dict) -> tuple[float, float] | None:
+    """Site (latitude, longitude) from ``[uv_sync]``, if it has one."""
+
+    if "latitude" in uv_sync and "longitude" in uv_sync:
+        return float(uv_sync["latitude"]), float(uv_sync["longitude"])
+    return None
+
+
+def daylight_expected(
+    name: str,
+    now: dt,
+    site: tuple[float, float] | None,
+    min_sun_elevation_deg: float,
+) -> bool:
+    """Should this instrument be producing files now?"""
+
+    if name not in DAYLIGHT_INSTRUMENTS or site is None:
+        return True
+    elevation = solar_elevation_deg(now, *site)
+    return elevation >= min_sun_elevation_deg + DAYLIGHT_MARGIN_DEG
+
+
 class FreshnessCheck:
     """Warn about instruments that have stopped producing files."""
 
@@ -322,14 +344,6 @@ class FreshnessCheck:
             return None
         return set(proc.stdout.split())
 
-    def _expected(self, name: str) -> bool:
-        """Should this instrument be producing files now?"""
-
-        if name not in DAYLIGHT_INSTRUMENTS or self.site is None:
-            return True
-        elevation = solar_elevation_deg(dt.now(UTC), *self.site)
-        return elevation >= self.min_sun_elevation_deg + DAYLIGHT_MARGIN_DEG
-
     def check(self, dry_run: bool) -> None:
         """Log instruments that went stale, are still stale, or have recovered."""
 
@@ -347,7 +361,10 @@ class FreshnessCheck:
         fresh = local | remote
 
         for name, minutes in self.max_age_min.items():
-            if name in fresh or not self._expected(name):
+            expected = daylight_expected(
+                name, dt.now(UTC), self.site, self.min_sun_elevation_deg
+            )
+            if name in fresh or not expected:
                 if self.warned.pop(name, None) is not None:
                     logger.info("freshness: %s: back to normal", name)
             elif now - self.warned.get(name, -FRESHNESS_REMIND_S) >= FRESHNESS_REMIND_S:
@@ -605,11 +622,7 @@ def main() -> None:
     config = read_config(Path(args.config))
     orch_config = config.get("orchestrator", {})
     uv_sync = config.get("uv_sync", {})
-    site = (
-        (float(uv_sync["latitude"]), float(uv_sync["longitude"]))
-        if "latitude" in uv_sync and "longitude" in uv_sync
-        else None
-    )
+    site = site_from_config(uv_sync)
 
     _setup_logging(orch_config.get("log_path", "/home/user/logs/orchestrator.log"))
 
