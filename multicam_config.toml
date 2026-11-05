@@ -217,7 +217,7 @@ baudrate = 4800    # confirmed on RPi5 /dev/ttyUSB0
 # ---------------------------------------------------------------------------
 
 [uv_sync]
-output_dir    = "/home/user/data/uv/"
+output_dir    = "/home/user/data/ultraviolet/"
 default_stack = 5       # Number of spectra to co-add
 max_retries   = 3        # Saturation retry limit (single-shot mode)
 # --- `capture uv-sync --monitor` (devices kept open, capture-uv-monitor.service) ---
@@ -276,8 +276,8 @@ supervise       = ["capture-uv-monitor.service", "multicam:capture-ir-video.serv
 supervise_interval_s = 60
 supervise_restart    = true   # start a supervised unit that is inactive/failed (sudo -n)
 # Warn if an instrument has written no new file for this many minutes (checked on both
-# nodes, with the supervise check; uv + spectrometer only in daylight). Log only. {} = off.
-freshness_max_age_min = { uv = 2, spectrometer = 2, infrared = 2, dslr = 5, environmental = 5 }
+# nodes, with the supervise check; ultraviolet + spectrometer only in daylight). Log only. {} = off.
+freshness_max_age_min = { ultraviolet = 2, spectrometer = 2, infrared = 2, dslr = 5, environmental = 5 }
 multicam_host   = "192.168.30.150"
 multicam_user   = "user"
 remote_venv_bin = "/home/user/.venv/bin/multicamctl"

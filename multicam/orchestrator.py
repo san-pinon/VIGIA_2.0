@@ -62,14 +62,14 @@ DEFAULT_SCHEDULE = {"dslr": 30, "environmental": 60}
 DEFAULT_NIGHT_SUN_ELEVATION_DEG = 3.0
 DEFAULT_SUPERVISE = ["capture-uv-monitor.service", "multicam:capture-ir-video.service"]
 DEFAULT_FRESHNESS_MIN = {
-    "uv": 2,
+    "ultraviolet": 2,
     "spectrometer": 2,
     "infrared": 2,
     "dslr": 5,
     "environmental": 5,
 }
 # These stop at night, when the UV monitor closes its devices.
-DAYLIGHT_INSTRUMENTS = {"uv", "spectrometer"}
+DAYLIGHT_INSTRUMENTS = {"ultraviolet", "spectrometer"}
 DEFAULT_MIN_SUN_ELEVATION_DEG = 5.0
 # Margin above that elevation before daylight instruments are expected again.
 DAYLIGHT_MARGIN_DEG = 1.0

@@ -59,7 +59,7 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
     pair to the data archive as it is captured.
 
     Output goes to the same directory as ``uv-sync`` (``uv_sync.output_dir``
-    or ``data_archive/uv``) so the dashboard picks up both capture paths.
+    or ``data_archive/ultraviolet``) so the dashboard picks up both capture paths.
 
     Parameters
     ----------
@@ -74,7 +74,7 @@ def capture_image(config: dict, extra_args: list[str] | None = None) -> None:
 
     output_dir = pathlib.Path(
         sync_config.get("output_dir")
-        or (config["metadata"]["data_archive"] + "/uv")
+        or (config["metadata"]["data_archive"] + "/ultraviolet")
     ) / "receive"
     output_dir.mkdir(parents=True, exist_ok=True)
 
