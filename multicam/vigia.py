@@ -287,13 +287,12 @@ def parse_status(text: str) -> NodeStatus:
 
 
 def _overall_state(statuses: dict[str, NodeStatus | None]) -> str:
-    """RUNNING, STOPPED or PARTIAL, from the nodes that answered."""
+    """RUNNING, STOPPED or PARTIAL. A node that didn't answer makes it PARTIAL."""
 
+    if None in statuses.values():
+        return "PARTIAL"
     states = [
-        state
-        for status in statuses.values()
-        if status is not None
-        for state, _ in status.units.values()
+        state for status in statuses.values() for state, _ in status.units.values()
     ]
     if states and all(s == "active" for s in states):
         return "RUNNING"
@@ -325,8 +324,12 @@ def find_problems(
     """Everything worth a warning. Empty means all looks right."""
 
     problems = []
-    overall = _overall_state(statuses)
-    capturing = overall != "STOPPED"
+    capturing = any(
+        state != "inactive"
+        for status in statuses.values()
+        if status is not None
+        for state, _ in status.units.values()
+    )
     min_free_gb = config.get("file_monitor", {}).get("min_free_gb", DEFAULT_MIN_FREE_GB)
 
     for name, status in statuses.items():
@@ -418,10 +421,12 @@ def _print_status(
         )
     print(f"  Witty Pi  default state reg {WITTY_DEFAULT_STATE_REG} = {witty}")
 
-    where = "both nodes" if all(statuses.values()) else "only the node that answered"
+    both = all(statuses.values())
+    where = "both nodes" if both else "only the node that answered"
     print(f"\nFiles ({where})   last {RECENT_WINDOW_S // 60} min   newest")
     for name, (count, age) in sorted(_merge_files(statuses).items()):
-        newest = "none in 2 days" if age is None else _format_age(age)
+        none = "none in 2 days" if both else "none on this node"
+        newest = none if age is None else _format_age(age)
         note = "" if _expected(name, config, now) else "   (sun low: not expected)"
         print(f"  {name:<18} {count:>10}   {newest}{note}")
 
