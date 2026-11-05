@@ -2,9 +2,11 @@
 VIGIA 2.0 master command: ``vigia start | stop | status``. Runs on uvcam.
 
 - ``start``: file monitors on both nodes, then the orchestrator, which brings up
-  the UV and IR services within a minute.
+  the UV and IR services within a minute. All three are also enabled at boot, so
+  the station comes back by itself after a power cut.
 - ``stop``: the orchestrator first, or it would restart the services; then UV +
-  file monitor on uvcam, IR + file monitor on multicam.
+  file monitor on uvcam, IR + file monitor on multicam. The three are disabled at
+  boot too, so a stopped station stays stopped through a reboot.
 - ``status``: units on both nodes, disk, clock, Witty Pi default state, recent
   files per instrument and the orchestrator's problem lines. Read-only.
 
@@ -13,6 +15,7 @@ multicam is reported, and never stops the work on uvcam.
 
 Each ``sudo`` call names exactly one unit: the sudoers rules on multicam
 (``vigia-capture``, ``vigia-file-monitor``) match the whole command line.
+The UV and IR services are never enabled at boot: the orchestrator owns them.
 
 :copyright:
     2026, Santiago Pinon.
@@ -50,10 +53,12 @@ UV_MONITOR = "capture-uv-monitor.service"
 IR_MONITOR = "capture-ir-video.service"
 UVCAM_UNITS = (ORCHESTRATOR, UV_MONITOR, FILE_MONITOR)
 MULTICAM_UNITS = (IR_MONITOR, FILE_MONITOR)
+BOOT_UNITS = (ORCHESTRATOR, FILE_MONITOR)  # enabled at boot while vigia is started
 
 SSH_UNREACHABLE = 255  # ssh's own exit code: it never reached the command
 START_TIMEOUT_S = 150  # the orchestrator waits for chrony for up to ~1 min
 STOP_TIMEOUT_S = 120  # above the units' own stop timeouts (90 s)
+BOOT_TIMEOUT_S = 30
 STATUS_TIMEOUT_S = 60
 RECENT_WINDOW_S = 180
 MAX_CLOCK_DIFFERENCE_S = 2  # ssh takes well under this, drift doesn't
@@ -149,22 +154,45 @@ def _act(node: Node, action: str, unit: str, timeout_s: float) -> Result:
     return result
 
 
+def _set_boot(node: Node, unit: str, enabled: bool) -> Result:
+    """Enable or disable one unit at boot; prints one line."""
+
+    action = "enable" if enabled else "disable"
+    result = node.run(["sudo", "-n", "systemctl", action, unit], BOOT_TIMEOUT_S)
+    label = f"{node.name} {unit}"
+    if result.ok:
+        print(f"  {label:<40} {action} at boot ok", flush=True)
+    else:
+        print(f"  {label:<40} {action} at boot FAILED: {result.message}", flush=True)
+    return result
+
+
+def _start_at_boot(node: Node, unit: str, timeout_s: float) -> Result:
+    """Enable, then start. A failed enable still starts: capturing comes first."""
+
+    enabled = _set_boot(node, unit, True)
+    if enabled.unreachable:
+        return enabled
+    started = _act(node, "start", unit, timeout_s)
+    return started if not started.ok else enabled
+
+
 def start(uvcam: Node, multicam: Node) -> int:
     """File monitors, then the orchestrator. Safe to run again."""
 
     failed = False
-    result = _act(multicam, "start", FILE_MONITOR, START_TIMEOUT_S)
-    if not result.ok:
-        failed = True
+    result = _start_at_boot(multicam, FILE_MONITOR, START_TIMEOUT_S)
+    failed = not result.ok
+    if result.unreachable:
         print(
             "  Carrying on without multicam. Its file monitor isn't supervised: "
             "run `vigia start` again once it's back."
         )
-    failed |= not _act(uvcam, "start", FILE_MONITOR, START_TIMEOUT_S).ok
+    failed |= not _start_at_boot(uvcam, FILE_MONITOR, START_TIMEOUT_S).ok
     print(
         "  Starting the orchestrator (it can wait ~1 min for the clock)...", flush=True
     )
-    failed |= not _act(uvcam, "start", ORCHESTRATOR, START_TIMEOUT_S).ok
+    failed |= not _start_at_boot(uvcam, ORCHESTRATOR, START_TIMEOUT_S).ok
     print("UV and IR come up within a minute. Check with `vigia status`.")
     return 1 if failed else 0
 
@@ -179,12 +207,15 @@ def stop(uvcam: Node, multicam: Node) -> int:
         )
         return 1
 
-    failed = False
+    failed = not _set_boot(uvcam, ORCHESTRATOR, False).ok
     for unit in (UV_MONITOR, FILE_MONITOR):
         failed |= not _act(uvcam, "stop", unit, STOP_TIMEOUT_S).ok
+    failed |= not _set_boot(uvcam, FILE_MONITOR, False).ok
     for unit in (IR_MONITOR, FILE_MONITOR):
         result = _act(multicam, "stop", unit, STOP_TIMEOUT_S)
         failed |= not result.ok
+        if result.ok and unit in BOOT_UNITS:
+            failed |= not _set_boot(multicam, unit, False).ok
         if result.unreachable:
             print(
                 "  multicam may still be capturing: "
@@ -211,7 +242,7 @@ class NodeStatus:
     source: str = ""
     offset: str = "?"
     leap: str = "?"
-    units: dict[str, tuple[str, str]] = field(default_factory=dict)
+    units: dict[str, tuple[str, str, str]] = field(default_factory=dict)
     files: dict[str, tuple[int, int | None]] = field(default_factory=dict)
     data_dir_ok: bool = True
 
@@ -230,7 +261,8 @@ echo "now $now"
 echo "uptime $(uptime -p)"
 echo "mem $(free -m | awk 'NR==2 {{print $7}}')"
 for u in {unit_names}; do
-  echo "unit $u $(systemctl is-active $u) $(systemctl show -p NRestarts --value $u)"
+  echo "unit $u $(systemctl is-active $u) \
+$(systemctl show -p NRestarts --value $u) $(systemctl is-enabled $u 2>/dev/null)"
 done
 chronyc -n sources 2>/dev/null | awk '$1 ~ /^[#^]\*$/ {{print "source", $1, $2}}'
 chronyc tracking 2>/dev/null | awk -F': ' '
@@ -268,7 +300,8 @@ def parse_status(text: str) -> NodeStatus:
         elif key == "unit" and parts:
             state = parts[1] if len(parts) > 1 else "?"
             restarts = parts[2] if len(parts) > 2 else "?"
-            status.units[parts[0]] = (state, restarts)
+            boot = parts[3] if len(parts) > 3 else "?"
+            status.units[parts[0]] = (state, restarts, boot)
         elif key == "source":
             status.source = rest
         elif key == "offset":
@@ -286,17 +319,29 @@ def parse_status(text: str) -> NodeStatus:
     return status
 
 
+def _wanted_running(statuses: dict[str, NodeStatus | None]) -> bool:
+    """Was the station started? ``start`` enables the orchestrator, ``stop`` doesn't."""
+
+    uvcam = statuses.get("uvcam")
+    return uvcam is not None and uvcam.units.get(ORCHESTRATOR, ("", "", ""))[2] == (
+        "enabled"
+    )
+
+
 def _overall_state(statuses: dict[str, NodeStatus | None]) -> str:
-    """RUNNING, STOPPED or PARTIAL. A node that didn't answer makes it PARTIAL."""
+    """
+    RUNNING or STOPPED only if every unit agrees with what was asked for: started
+    (orchestrator enabled at boot) or stopped. Anything else is PARTIAL, including
+    a node that didn't answer.
+    """
 
     if None in statuses.values():
         return "PARTIAL"
-    states = [
-        state for status in statuses.values() for state, _ in status.units.values()
-    ]
-    if states and all(s == "active" for s in states):
+    states = [unit[0] for status in statuses.values() for unit in status.units.values()]
+    wanted = _wanted_running(statuses)
+    if states and wanted and all(s == "active" for s in states):
         return "RUNNING"
-    if states and all(s == "inactive" for s in states):
+    if states and not wanted and all(s == "inactive" for s in states):
         return "STOPPED"
     return "PARTIAL"
 
@@ -324,22 +369,38 @@ def find_problems(
     """Everything worth a warning. Empty means all looks right."""
 
     problems = []
-    capturing = any(
-        state != "inactive"
+    wanted = _wanted_running(statuses)
+    capturing = wanted or any(
+        unit[0] != "inactive"
         for status in statuses.values()
         if status is not None
-        for state, _ in status.units.values()
+        for unit in status.units.values()
     )
     min_free_gb = config.get("file_monitor", {}).get("min_free_gb", DEFAULT_MIN_FREE_GB)
+
+    if wanted and statuses["uvcam"].units[ORCHESTRATOR][0] != "active":
+        problems.append("the station was started, but the orchestrator is not running")
+    elif capturing and not wanted:
+        problems.append(
+            "units are up, but not through `vigia start`: "
+            "the station won't come back after a power cut"
+        )
 
     for name, status in statuses.items():
         if status is None:
             problems.append(f"{name} unreachable")
             continue
-        if capturing:
-            for unit, (state, _) in status.units.items():
-                if state != "active":
-                    problems.append(f"{name} {unit} is {state}")
+        for unit, (state, _, boot) in status.units.items():
+            if capturing and state != "active":
+                problems.append(f"{name} {unit} is {state}")
+            should_enable = wanted and unit in BOOT_UNITS
+            if should_enable and boot != "enabled":
+                problems.append(
+                    f"{name} {unit} is not enabled at boot: "
+                    "it won't come back after a power cut"
+                )
+            elif boot == "enabled" and not should_enable:
+                problems.append(f"{name} {unit} is enabled at boot, but shouldn't be")
         if not status.data_dir_ok:
             problems.append(f"{name}: data folder missing")
         elif status.disk_free_gb is not None and status.disk_free_gb < min_free_gb:
@@ -403,8 +464,10 @@ def _print_status(
         if status is None:
             print(f"  {name:<9} UNREACHABLE")
             continue
-        for unit, (state, restarts) in status.units.items():
-            print(f"  {name:<9} {unit:<30} {state:<12} restarts={restarts}")
+        for unit, (state, restarts, boot) in status.units.items():
+            print(
+                f"  {name:<9} {unit:<30} {state:<12} restarts={restarts:<4} boot={boot}"
+            )
 
     print("\nNodes")
     for name, status in statuses.items():
