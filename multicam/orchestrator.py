@@ -28,7 +28,7 @@ The orchestrator schedules the slower captures and watches the services:
   with no new file for that long, whatever the cause: a service can be
   ``active`` and still be producing nothing. This only logs;
 - after ``canon_usb_reset_after`` failed Canon shots in a row it resets the
-  Canon's USB port on multicam, at most once per ``canon_usb_reset_every_min``.
+  Canon's USB connection on multicam, at most once per ``canon_usb_reset_every_min``.
 
 :copyright:
     2026, Santiago Pinon.
@@ -79,7 +79,6 @@ FRESHNESS_GRACE_S = 300  # no warnings while everything is starting up
 FRESHNESS_REMIND_S = 600
 DEFAULT_CANON_USB_RESET_AFTER = 6  # failed shots in a row; 0 = never reset
 DEFAULT_CANON_USB_RESET_EVERY_MIN = 30
-DEFAULT_CANON_USB_PORT = "1-4"  # used when the Canon has dropped off the bus
 CANON_USB_RESET_COMMAND = "/usr/local/sbin/vigia-canon-usb-reset"
 CANON_USB_RESET_TIMEOUT_S = 30
 SSH_OPTIONS = [
@@ -498,14 +497,7 @@ def run_scheduler(
     )
 
     usb_reset = CanonUsbReset(
-        remote.command(
-            [
-                "sudo",
-                "-n",
-                CANON_USB_RESET_COMMAND,
-                str(orch_config.get("canon_usb_port", DEFAULT_CANON_USB_PORT)),
-            ]
-        ),
+        remote.command(["sudo", "-n", CANON_USB_RESET_COMMAND]),
         int(orch_config.get("canon_usb_reset_after", DEFAULT_CANON_USB_RESET_AFTER)),
         60.0
         * float(
